@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { runJsonl, shorten } = require('./common');
+const { developmentPolicy, checkDevelopment } = require('../development');
 
 // O "codex" do npm é um .cmd/.ps1; chamar o JS direto com node evita problemas de aspas no Windows.
 function resolveCodex(config) {
@@ -29,15 +30,34 @@ function describeItem(item) {
 async function runCodex(o) {
   const { config } = o;
   const { cmd, pre } = resolveCodex(config);
-  const common = ['exec', '--json', '--skip-git-repo-check', '-s', o.sandbox || config.codex.sandbox, '-C', o.cwd];
+  const policy = developmentPolicy(config, o.cwd, o.sandbox);
+  let diagnostic = '';
+  if (policy.preflight) {
+    let desktopProbe;
+    if (process.versions.electron) {
+      const { app } = require('electron');
+      desktopProbe = () => require('../desktop-probe').probeDesktop({ executable: process.execPath, appPath: app.getAppPath(), packaged: app.isPackaged });
+    }
+    const report = await checkDevelopment({ repo: o.cwd, desktopProbe });
+    diagnostic = 'Verificação no processo do aplicativo (a sessão do Codex pode ter outros bloqueios):\n' + report.checks.map(c => `${c.ok ? 'OK' : 'FALHA'}: ${c.detail}`).join('\n');
+    o.onEvent({ kind: 'tool', text: diagnostic });
+  }
+  const common = ['exec', '--json', '--skip-git-repo-check', '-s', policy.sandbox, '-C', o.cwd];
   if (config.workspaceRoot && config.workspaceRoot !== o.cwd) common.push('--add-dir', config.workspaceRoot);
   if (config.codex.model) common.push('-m', config.codex.model);
   common.push('-c', `model_reasoning_effort="${o.effort === 'low' ? 'low' : o.effort === 'high' ? 'high' : 'medium'}"`);
 
   const images = (o.images || []).flatMap((p) => ['-i', p]);
-  const args = o.sessionId ? [...pre, ...common, 'resume', o.sessionId, ...images, '-'] : [...pre, ...common, ...images, '-'];
+  // Não reaproveita sessão com permissões antigas no repositório da Ohara.
+  const resume = o.sessionId && !policy.development;
+  const args = resume ? [...pre, ...common, 'resume', o.sessionId, ...images, '-'] : [...pre, ...common, ...images, '-'];
 
-  const prompt = o.sessionId ? o.prompt : `${o.systemPrompt}\n\n---\n\n${o.prompt}`;
+  const preflight = policy.preflight ? [
+    'Antes de alterar o projeto, verifique dentro desta sessão: gravação na pasta de metadados do Git com um arquivo temporário exclusivo, conexão e permissão de escrita no GitHub com gh repo view, e execução gráfica do Electron com --ohara-desktop-probe (modo isolado, sem WhatsApp).',
+    'Informe os bloqueios encontrados antes de trabalhar. Não amplie permissões nem tente contornar o sandbox. Um teste feito pelo aplicativo principal não garante os mesmos acessos dentro desta sessão.',
+    'Continue as etapas independentes autorizadas; não declare publicação ou validação real concluída sem evidência.',
+  ].join('\n') : '';
+  const prompt = [resume ? o.prompt : `${o.systemPrompt}\n\n---\n\n${o.prompt}`, diagnostic, preflight].filter(Boolean).join('\n\n');
 
   const state = { sessionId: o.sessionId || null, text: '', usage: null, error: null };
   const onJson = (ev) => {

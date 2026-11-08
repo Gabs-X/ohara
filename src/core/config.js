@@ -34,6 +34,8 @@ const DEFAULT_CONFIG = {
     // Vazio = usa o modelo padrão configurado no ~/.codex/config.toml.
     model: '',
     sandbox: 'workspace-write',
+    developmentPermissions: 'restricted', // restricted | full; apenas no selfRepo
+    developmentPreflight: true,
   },
 
   // Limites de uso (0 a 1) que mudam o roteamento do chat.
@@ -95,6 +97,7 @@ const DEFAULT_CONFIG = {
       phone: '', // com DDI, ex.: +5511999999999
       apikey: '',
       notifyMeetingTasks: true, // avisa quando uma reunião gera demandas novas para você
+      confirmContacts: true, // mensagem para contato: mostra o contato achado e só envia depois que você confirmar
     },
   },
 
@@ -106,6 +109,7 @@ const DEFAULT_CONFIG = {
     whisperModel: 'base', // tiny | base | small (maior = mais preciso e mais lento)
     language: 'pt',
     wakeWord: false, // escuta contínua: diga "Ohara, ..." (precisa do Whisper)
+    showListeningIndicator: true, // indicador flutuante, inclusive com a janela escondida
     autoSendVoice: true, // na janela rápida, envia assim que transcreve
   },
 };

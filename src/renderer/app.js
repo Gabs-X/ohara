@@ -195,7 +195,7 @@ function renderDrafts(wrap, m) {
   const label = { pending: 'aguardando sua confirmação', sending: 'enviando…', sent: 'enviada', cancelled: 'cancelada', error: 'não enviada' };
   box.innerHTML = m.whatsappDrafts
     .map((d, i) => `<div class="wa-draft ${d.status}">
-      <div class="wa-head">📱 WhatsApp para <b>${escapeHtml(d.sentTo || d.to)}</b> <span class="muted small">· ${label[d.status] || d.status}</span></div>
+      <div class="wa-head">📱 WhatsApp para <b>${escapeHtml(d.sentTo || d.contact || d.to)}</b>${d.contact && !d.sentTo && d.contact !== d.to ? ` <span class="muted small">(você disse “${escapeHtml(d.to)}”)</span>` : ''} <span class="muted small">· ${label[d.status] || d.status}</span></div>
       <div class="wa-text">${escapeHtml(d.text)}</div>
       ${d.error ? `<p class="error small">⚠️ ${escapeHtml(d.error)}</p>` : ''}
       ${d.status === 'pending' || d.status === 'error' ? `<div class="row"><button class="btn small-btn primary" data-wa="send" data-i="${i}">${d.status === 'error' ? 'Tentar de novo' : 'Enviar'}</button><button class="btn small-btn" data-wa="cancel" data-i="${i}">Cancelar</button></div>` : ''}

@@ -1,0 +1,14 @@
+* { box-sizing: border-box; }
+body { margin: 0; padding: 9px 12px; color: #f1f5f9; background: #171c28; font: 12px 'Segoe UI', sans-serif; border: 1px solid #46516a; height: 76px; }
+.caption { color: #aeb9cd; display: flex; align-items: center; justify-content: space-between; -webkit-app-region: drag; }
+button { -webkit-app-region: no-drag; cursor: pointer; color: #f1f5f9; background: #303b52; border: 1px solid #596680; border-radius: 5px; padding: 4px 8px; }
+button:focus-visible { outline: 2px solid #a5b4fc; }
+button:disabled { opacity: .6; cursor: wait; }
+#hide { padding: 0 5px; border: 0; background: transparent; font-size: 16px; line-height: 16px; }
+.controls { display: flex; align-items: center; gap: 9px; margin-top: 7px; }
+#status { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#dot { flex: 0 0 10px; height: 10px; border-radius: 50%; background: #94a3b8; }
+#dot[data-mode="listening"] { background: #4ade80; }
+#dot[data-mode="hearing"] { background: #4ade80; box-shadow: 0 0 0 4px #4ade8033; }
+#dot[data-mode="starting"], #dot[data-mode="paused"] { background: #fbbf24; }
+#dot[data-mode="error"] { background: #fb7185; }

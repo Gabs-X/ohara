@@ -29,7 +29,7 @@ const CONTACTS_NOTE = (confirm) => [
   '[[/whatsapp]]',
   'Não peça o nome completo: a Ohara procura o contato pelo nome mesmo parcial, apelido ou mal transcrito, e só pergunta se houver mais de um parecido.',
   confirm
-    ? 'A Ohara mostra a mensagem e envia quando ele confirmar ("confirmado", "envia" ou o botão Enviar).'
+    ? 'A Ohara procura o contato, mostra a ele o nome exato que achou e só envia quando ele confirmar ("confirmado", "sim" ou o botão Enviar). Não diga que já enviou. Se ele corrigir o contato, repita o bloco com o nome novo.'
     : 'A Ohara ENVIA NA HORA: não peça confirmação, não diga que precisa de botão e não pergunte "tem certeza". Ele já pediu.',
   'Se ele disser "envia a mensagem" sobre uma mensagem que você já preparou nesta conversa, repita o bloco com o mesmo texto.',
 ].join('\n');
@@ -310,10 +310,11 @@ class Orchestrator {
 
     // Agente paralelo não reaproveita a sessão (ela está em uso): começa limpo, com o histórico.
     // A automelhoria também roda à parte, porque trabalha em outra pasta (o repositório da Ohara).
-    const isolated = parallel || !!improvement;
+    const cwd = improvement ? config.selfRepo : chat.cwd;
+    const development = decision.provider === 'codex' && config.selfRepo && path.resolve(cwd).toLowerCase() === path.resolve(config.selfRepo).toLowerCase();
+    const isolated = parallel || !!improvement || development;
     const sess = isolated ? null : chat.sessions[decision.provider];
     const context = this.#handoff(chat, decision.provider, { upTo: userIndex, fresh: isolated });
-    const cwd = improvement ? config.selfRepo : chat.cwd;
     const request = improvement ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}` : text;
     const askWhatsApp = wantsWhatsApp(text) && !!(this.whatsapp || this.whatsappWeb);
     const onEvent = (ev) => {
@@ -443,7 +444,7 @@ class Orchestrator {
     return assistant;
   }
 
-  // Contato → envia na hora (ou deixa para confirmar, se ele ligou a confirmação); sem contato → vai para o próprio Gabriel.
+  // Contato → mostra o contato achado e espera a confirmação (ou envia na hora, se ele desligou a confirmação); sem contato → vai para o próprio Gabriel.
   async #handleWhatsApp(assistant, { toSelf = true, chat = null, autoSend = true } = {}) {
     const { text, drafts } = extractDrafts(assistant.text);
     if (drafts.length) {
@@ -453,7 +454,24 @@ class Orchestrator {
         for (const d of assistant.whatsappDrafts) Object.assign(d, { status: 'error', error: 'Envio para contatos indisponível.' });
         return;
       }
-      if (!autoSend || !chat) return;
+      if (!chat) return;
+      if (!autoSend) {
+        // Acha o contato de verdade e mostra o nome para ele confirmar; o envio vai exatamente para esse contato.
+        const lines = [];
+        for (const d of assistant.whatsappDrafts) {
+          if (!this.whatsappWeb.resolve) continue;
+          try {
+            const { to } = await this.whatsappWeb.resolve(d.to);
+            d.contact = to;
+            lines.push(`Achei o contato "${to}" no seu WhatsApp. É esse? Diga "confirmado" para enviar ou "cancela".`);
+          } catch (err) {
+            Object.assign(d, { status: 'error', error: err.message });
+            lines.push(`Ainda não enviei para ${d.to}: ${err.message}`);
+          }
+        }
+        if (lines.length) assistant.text = `${assistant.text}\n\n${lines.join('\n')}`.trim();
+        return;
+      }
       const lines = [];
       for (let i = 0; i < assistant.whatsappDrafts.length; i++) {
         const d = assistant.whatsappDrafts[i];
@@ -503,7 +521,7 @@ class Orchestrator {
     if (!this.whatsappWeb) return null;
     const found = this.#openDrafts(chat);
     if (!found) return null;
-    const intent = parseSendReply(text, found.open.map(({ d }) => d.to));
+    const intent = parseSendReply(text, found.open.flatMap(({ d }) => [d.to, d.contact].filter(Boolean)));
     if (!intent) return null;
     // "sim" sozinho com uma oferta de melhoria aberta: a pergunta era a melhoria, não o envio.
     if (intent === 'yes' && chat.pendingImprovement && Date.now() - chat.pendingImprovement.at < 30 * 60_000) return null;
@@ -546,7 +564,7 @@ class Orchestrator {
     draft.error = null;
     this.emit('chat:message', { chatId, message: msg });
     try {
-      const { to } = await this.whatsappWeb.send(draft.to, draft.text);
+      const { to } = await this.whatsappWeb.send(draft.contact || draft.to, draft.text);
       Object.assign(draft, { status: 'sent', sentTo: to, sentAt: Date.now() });
     } catch (err) {
       Object.assign(draft, { status: 'error', error: err.message });

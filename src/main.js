@@ -1,6 +1,10 @@
 const {
   app, BrowserWindow, Tray, Menu, Notification, globalShortcut, ipcMain, dialog, desktopCapturer, screen, shell, nativeImage, clipboard, session, safeStorage,
 } = require('electron');
+if (process.argv.includes('--ohara-desktop-probe')) {
+  require('./core/desktop-probe').runDesktopProbe();
+  return;
+}
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -53,6 +57,8 @@ const ICON = path.join(__dirname, 'assets', 'icon.png');
 
 let win = null;
 let quick = null;
+let listeningIndicator = null;
+let listeningStatus = { mode: 'off', text: 'Microfone desligado' };
 let tray = null;
 let quitting = false;
 const hotkeyStatus = {};
@@ -148,7 +154,7 @@ const usage = new UsageTracker(usageStore);
 
 // Envia para todas as janelas (principal e rápida).
 const send = (channel, payload) => {
-  for (const w of [win, quick]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
+  for (const w of [win, quick, listeningIndicator]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
 };
 
 // ---------- Fala ----------
@@ -287,6 +293,9 @@ async function voiceCommand(text) {
 
 // Salva parte da configuração (da tela de Ajustes ou de um comando de voz) e aplica na hora.
 function updateConfig(partial) {
+  if (partial.codex?.developmentPermissions !== undefined && !['restricted', 'full'].includes(partial.codex.developmentPermissions)) {
+    throw new Error('Permissão de desenvolvimento inválida.');
+  }
   // Ignora o marcador "••••••" que a interface mostra no lugar do segredo.
   for (const p of SECRETS) if (getIn(partial, p) === '••••••') setIn(partial, p, undefined);
   const user = encryptSecrets(deepMerge(readUserConfig(), partial));
@@ -298,8 +307,15 @@ function updateConfig(partial) {
   if (partial.integrations?.slack) slack.users = null;
   const pub = publicConfig();
   if (partial.voice) {
+    if (partial.voice.wakeWord !== undefined) {
+      if (!config.voice.wakeWord) endVoiceSession(false);
+      setListeningStatus(config.voice.wakeWord
+        ? { mode: 'starting', text: 'Abrindo microfone…' }
+        : { mode: 'off', text: 'Microfone desligado' });
+    }
     send('config:changed', pub); // a janela liga/desliga a escuta
     trayRebuild(); // atualiza o "Ouvir 'Ohara'" da bandeja
+    syncListeningIndicator();
   }
   return pub;
 }
@@ -450,6 +466,41 @@ const webPreferences = () => ({
   nodeIntegration: false,
   sandbox: true,
 });
+
+function setListeningStatus(status) {
+  const modes = ['off', 'starting', 'listening', 'hearing', 'paused', 'error'];
+  if (!status || !modes.includes(status.mode)) return;
+  listeningStatus = config.voice.wakeWord
+    ? { mode: status.mode, text: String(status.text || '').slice(0, 160) }
+    : { mode: 'off', text: 'Microfone desligado' };
+  for (const w of [win, listeningIndicator]) {
+    if (w && !w.isDestroyed()) w.webContents.send('voice:status', listeningStatus);
+  }
+  tray?.setToolTip(`Ohara · ${listeningStatus.text}`);
+}
+
+function syncListeningIndicator() {
+  if (!listeningIndicator || listeningIndicator.isDestroyed()) return;
+  if (config.voice.showListeningIndicator !== false) listeningIndicator.showInactive();
+  else listeningIndicator.hide();
+}
+
+function createListeningIndicator() {
+  if (config.voice.wakeWord) setListeningStatus({ mode: 'starting', text: 'Abrindo microfone…' });
+  const area = screen.getPrimaryDisplay().workArea;
+  listeningIndicator = new BrowserWindow({
+    width: 320, height: 76,
+    x: area.x + Math.max(0, area.width - 340), y: area.y + Math.max(0, area.height - 96),
+    frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true,
+    show: false, backgroundColor: '#171c28', webPreferences: webPreferences(),
+  });
+  listeningIndicator.loadFile(path.join(__dirname, 'renderer', 'listening.html'));
+  listeningIndicator.once('ready-to-show', syncListeningIndicator);
+  listeningIndicator.on('close', (e) => {
+    if (!quitting) { e.preventDefault(); updateConfig({ voice: { showListeningIndicator: false } }); }
+  });
+  secureWindow(listeningIndicator);
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -639,6 +690,11 @@ function createTray() {
           },
         },
         {
+          label: 'Mostrar indicador de escuta', type: 'checkbox',
+          checked: config.voice.showListeningIndicator !== false,
+          click: (item) => updateConfig({ voice: { showListeningIndicator: item.checked } }),
+        },
+        {
           label: 'Iniciar com o Windows',
           type: 'checkbox',
           checked: app.getLoginItemSettings().openAtLogin,
@@ -719,6 +775,10 @@ function registerIpc() {
   handle('config:get', () => publicConfig());
   handle('app:version', () => app.getVersion());
   handle('config:set', (partial) => updateConfig(partial));
+  handle('development:check', () => require('./core/development').checkDevelopment({
+    repo: config.selfRepo,
+    desktopProbe: () => require('./core/desktop-probe').probeDesktop({ executable: process.execPath, appPath: app.getAppPath(), packaged: app.isPackaged }),
+  }));
   handle('hotkeys:status', () => hotkeyStatus);
 
   // Conversas
@@ -843,6 +903,11 @@ function registerIpc() {
   handleSafe('voice:heard', (wavBytes) => onVoiceHeard(wavBytes));
   handle('voice:end', () => endVoiceSession(false));
   handle('voice:log', (msg) => voiceLog(String(msg).slice(0, 500)));
+  handle('voice:status', () => listeningStatus);
+  ipcMain.handle('voice:status-report', (event, status) => {
+    if (event.sender !== win?.webContents) return;
+    setListeningStatus(status);
+  });
   handle('app:loginItem', (on) => {
     if (on !== undefined && app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!on, args: ['--hidden'] });
     return { enabled: app.getLoginItemSettings().openAtLogin, available: app.isPackaged };
@@ -874,6 +939,7 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   createQuick();
+  createListeningIndicator();
   trayRebuild = createTray();
   registerHotkeys();
 

@@ -18,6 +18,19 @@ async function renderSettings() {
   body.innerHTML = `
   <div class="settings">
     <section class="section">
+      <h2>Desenvolvimento e publicação</h2>
+      <p class="muted small">Permissões do Codex ao trabalhar no código da Ohara. Valem nas próximas execuções; outras pastas mantêm sua configuração habitual.</p>
+      <label>Acesso ao desenvolver a Ohara<select id="dev-permissions">
+        <option value="restricted" ${cfg.codex?.developmentPermissions !== 'full' ? 'selected' : ''}>Restrito ao ambiente de trabalho</option>
+        <option value="full" ${cfg.codex?.developmentPermissions === 'full' ? 'selected' : ''}>Acesso completo ao PC e à rede</option>
+      </select></label>
+      <p class="muted small">Acesso completo permite ao Codex executar comandos com os acessos da sua conta, inclusive fora do projeto. Políticas do sistema e permissões do Windows ainda se aplicam. Ações destrutivas e publicações continuam dependendo do seu pedido.</p>
+      <label class="check"><input id="dev-preflight" type="checkbox" ${cfg.codex?.developmentPreflight !== false ? 'checked' : ''}> Verificar acessos no início das tarefas no código da Ohara</label>
+      <div class="row"><button class="btn small-btn" id="dev-save">Salvar permissões</button><button class="btn small-btn" id="dev-check">Verificar acessos agora</button></div>
+      <p class="muted small">A verificação abaixo roda pelo aplicativo e abre uma janela de teste por alguns segundos. A sessão do Codex pode ter restrições adicionais, verificadas no início da tarefa.</p>
+      <p id="dev-result" class="small" role="status" style="white-space:pre-line"></p>
+    </section>
+    <section class="section">
       <h2>📅 Agenda</h2>
       <p class="muted small">Google Agenda → ⚙️ Configurações → clique na sua agenda → <b>Endereço secreto no formato iCal</b>. Com ela, a aba Hoje mostra suas reuniões e a pauta chega ${cfg.meetings.prepMinutes} min antes. O endereço fica criptografado neste PC.</p>
       <div class="row"><input id="cal-url" type="password" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics" value="${I.calendarIcsUrlSet ? '••••••' : ''}"><button class="btn small-btn" id="cal-save">Salvar</button>${I.calendarIcsUrlSet ? '<button class="btn small-btn" id="cal-clear">Remover</button>' : ''}</div>
@@ -50,6 +63,7 @@ async function renderSettings() {
 
       <h3>Mensagens para os seus contatos</h3>
       <p class="muted small">Peça “manda pro João no zap que vou atrasar”: a Ohara escreve a mensagem e mostra um cartão para você <b>confirmar antes de enviar</b>. Usa o seu WhatsApp Web numa janela da Ohara: conecte uma vez escaneando o QR Code (WhatsApp no celular → Aparelhos conectados). Não é a API oficial do WhatsApp; em tese, a conta pode sofrer restrição.</p>
+      <label class="check"><input type="checkbox" id="wa-confirm" ${I.whatsapp?.confirmContacts !== false ? 'checked' : ''}> Confirmar o contato antes de enviar (a Ohara diz qual contato achou e espera seu “confirmado”)</label>
       <div class="row"><button class="btn small-btn" id="waw-connect">Conectar / abrir WhatsApp Web</button><button class="btn small-btn" id="waw-check">Verificar conexão</button><span id="waw-state" class="small"></span></div>
     </section>
 
@@ -63,6 +77,8 @@ async function renderSettings() {
       </div>
       <p id="w-progress" class="small muted"></p>
       <label class="check"><input type="checkbox" id="w-wake" ${cfg.voice.wakeWord ? 'checked' : ''} ${ws.installed ? '' : 'disabled'}> Escuta contínua: diga <b>“Ohara”</b>, ela responde e a conversa fica aberta (fale os pedidos sem repetir o nome; “valeu” encerra) <span class="muted small">(<span id="listen-state">—</span>; passe o mouse para ver as últimas falas ouvidas)</span></label>
+      <label class="check"><input type="checkbox" id="w-indicator" ${cfg.voice.showListeningIndicator !== false ? 'checked' : ''}> Mostrar indicador flutuante de escuta, mesmo com a Ohara minimizada</label>
+      <p class="muted small">Verde: ouvindo. Amarelo: abrindo ou pausada enquanto respondo. Cinza: desligado. Vermelho: erro. Arraste o indicador pelo título; use Ligar/Desligar para controlar o microfone.</p>
       <label class="check"><input type="checkbox" id="w-autosend" ${cfg.voice.autoSendVoice ? 'checked' : ''}> Na janela rápida, enviar assim que terminar de transcrever</label>
       <label class="check"><input type="checkbox" id="w-speak" ${cfg.voice.speakReplies ? 'checked' : ''}> Ler respostas em voz alta</label>
       <label>Voz da Ohara<div class="row">
@@ -115,6 +131,19 @@ async function renderSettings() {
     await central.setConfig(partial);
     toast(msg);
   };
+  $s('#dev-save').addEventListener('click', () => callSafe((async () => {
+    await save({ codex: { developmentPermissions: $s('#dev-permissions').value, developmentPreflight: $s('#dev-preflight').checked } }, 'Permissões salvas para as próximas execuções.');
+  })()));
+  $s('#dev-check').addEventListener('click', async () => {
+    const button = $s('#dev-check');
+    button.disabled = true;
+    $s('#dev-result').textContent = 'Verificando Git, GitHub e Electron…';
+    try {
+      const result = await central.checkDevelopment();
+      $s('#dev-result').textContent = result.checks.map(c => `${c.ok ? '✓' : '✗'} ${c.detail}`).join('\n');
+    } catch (err) { $s('#dev-result').textContent = err.message; }
+    finally { button.disabled = false; }
+  });
 
   // Agenda
   $s('#cal-save').addEventListener('click', async () => {
@@ -162,6 +191,7 @@ async function renderSettings() {
   });
   $s('#wa-clear')?.addEventListener('click', async () => { await save({ integrations: { whatsapp: { phone: '', apikey: '' } } }, 'WhatsApp removido.'); renderSettings(); });
   $s('#wa-meetings').addEventListener('change', (e) => save({ integrations: { whatsapp: { notifyMeetingTasks: e.target.checked } } }));
+  $s('#wa-confirm').addEventListener('change', (e) => save({ integrations: { whatsapp: { confirmContacts: e.target.checked } } }));
   $s('#waw-connect').addEventListener('click', () => central.whatsappWebConnect());
   $s('#waw-check').addEventListener('click', async () => {
     const st = $s('#waw-state');
@@ -186,10 +216,10 @@ async function renderSettings() {
     renderSettings();
   });
   $s('#w-wake').addEventListener('change', async (e) => {
-    const c = await central.setConfig({ voice: { wakeWord: e.target.checked } });
-    applyListening(c);
+    await central.setConfig({ voice: { wakeWord: e.target.checked } });
   });
   $s('#w-autosend').addEventListener('change', (e) => save({ voice: { autoSendVoice: e.target.checked } }));
+  $s('#w-indicator').addEventListener('change', (e) => save({ voice: { showListeningIndicator: e.target.checked } }));
   $s('#w-tts').addEventListener('change', (e) => save({ voice: { ttsVoice: e.target.value } }, 'Voz salva.'));
   $s('#w-tts-test').addEventListener('click', () =>
     central.speak('Oi, Gabriel! Eu sou a Ohara. Abri o Spotify pra você e já deixei o resumo da reunião no painel de demandas.', $s('#w-tts').value),

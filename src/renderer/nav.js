@@ -31,6 +31,7 @@ central.onView((view) => {
 // Escuta contínua roda nesta janela, mesmo escondida. Cada fala vai para o processo principal,
 // que reconhece "Ohara", abre a conversa por voz e mantém o microfone aberto para os próximos pedidos.
 let stopListening = null;
+let listeningRevision = 0;
 const heardLog = []; // últimas falas ouvidas (aparecem ao passar o mouse no estado, em Ajustes → Voz)
 function showListenState(s) {
   const dot = document.getElementById('listen-state');
@@ -43,15 +44,20 @@ central.onVoiceSession(({ state }) => showListenState(state));
 central.onConfigChanged((cfg) => applyListening(cfg));
 
 async function applyListening(cfg) {
+  const revision = ++listeningRevision;
   const want = !!cfg.voice.wakeWord;
   if (want && !stopListening) {
+    central.reportListening({ mode: 'starting', text: 'Abrindo microfone…' });
     const ws = await central.whisperStatus();
+    if (revision !== listeningRevision) return;
     if (!ws.installed) {
       central.voiceLog(`escuta ligada, mas o Whisper (modelo ${ws.modelName}) não está instalado`);
+      central.reportListening({ mode: 'error', text: 'Instale o Whisper em Ajustes → Voz' });
       return;
     }
     central.voiceLog('escuta: iniciando');
     stopListening = Voice.listen({
+      onCapture: (status) => central.reportListening(status),
       onHeard: async (bytes) => {
         const r = await central.voiceHeard(bytes);
         if (!r.ok) throw new Error(r.error);
@@ -67,9 +73,10 @@ async function applyListening(cfg) {
       // Não ouve a própria voz enquanto lê uma resposta (só conta áudio tocando de verdade).
       isSpeaking: () => typeof tts !== 'undefined' && !!tts.audio && !tts.audio.paused && !tts.audio.ended,
     });
-  } else if (!want && stopListening) {
-    stopListening();
+  } else if (!want) {
+    stopListening?.();
     stopListening = null;
+    central.reportListening({ mode: 'off', text: 'Microfone desligado' });
   }
 }
 

@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('central', {
   // Configuração
   getConfig: inv('config:get'),
   setConfig: inv('config:set'),
+  checkDevelopment: inv('development:check'),
   hotkeyStatus: inv('hotkeys:status'),
   appVersion: inv('app:version'),
 
@@ -42,6 +43,9 @@ contextBridge.exposeInMainWorld('central', {
   voiceHeard: inv('voice:heard'),
   voiceEnd: inv('voice:end'),
   voiceLog: inv('voice:log'),
+  listeningStatus: inv('voice:status'),
+  reportListening: inv('voice:status-report'),
+  onListeningStatus: on('voice:status'),
   onVoiceSession: on('voice:session'),
   onConfigChanged: on('config:changed'),
   openPath: inv('shell:openPath'),

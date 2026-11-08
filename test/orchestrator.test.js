@@ -22,7 +22,7 @@ stub('providers/codex', { runCodex: fakeProvider('codex') });
 const { Orchestrator } = require('../src/core/orchestrator');
 const { DEFAULT_CONFIG } = require('../src/core/config');
 
-// confirmContacts: liga a confirmação antes de mandar para contatos (o padrão é enviar na hora).
+// confirmContacts: confirmação do contato antes de mandar (no app vem ligada; aqui o padrão dos testes é enviar na hora).
 function setup({ confirmContacts = false, ...extra } = {}) {
   calls.length = 0;
   const events = [];
@@ -141,6 +141,51 @@ test('com confirmação ligada, pedido para contato vira rascunho e só sai depo
   const d = await o.confirmWhatsApp(chat.id, msg.id, 0);
   assert.equal(d.status, 'sent');
   assert.deepEqual(sent, [{ to: 'João', text: 'Oi João, vou atrasar uns 10 min!' }]);
+});
+
+test('com confirmação, ela mostra o contato que achou e envia exatamente para ele depois do "confirmado"', async () => {
+  const sent = [];
+  const whatsappWeb = {
+    resolve: async (to) => ({ to: to === 'Alan' ? 'Alan Costa' : to }),
+    send: async (to, text) => { sent.push({ to, text }); return { to }; },
+  };
+  const { o } = setup({ whatsappWeb, confirmContacts: true });
+  const chat = o.create('C:\\tmp');
+  const p = o.send(chat.id, { text: 'manda pro Alan que chego às 8', runId: 'k1' });
+  await tick();
+  assert.match(calls[0].opts.systemPrompt, /mostra a ele o nome exato/);
+  calls[0].answer = 'Mensagem pronta.\n[[whatsapp para="Alan"]]\nChego às 8!\n[[/whatsapp]]';
+  calls[0].finish();
+  const msg = await p;
+  assert.equal(sent.length, 0, 'nada sai antes da confirmação');
+  assert.equal(msg.whatsappDrafts[0].contact, 'Alan Costa');
+  assert.match(msg.text, /Achei o contato "Alan Costa" no seu WhatsApp\. É esse\?/);
+
+  const reply = await o.send(chat.id, { text: 'sim, envia pro Alan Costa', runId: 'k2' });
+  assert.deepEqual(sent, [{ to: 'Alan Costa', text: 'Chego às 8!' }], 'envia para o contato confirmado, não para o nome falado');
+  assert.match(reply.text, /enviei a mensagem para Alan Costa/);
+});
+
+test('com confirmação, contato ambíguo não é enviado e ela pergunta qual é', async () => {
+  const sent = [];
+  const whatsappWeb = {
+    resolve: async () => { throw new Error('Tem mais de um contato parecido com "Ana": Ana Paula, Ana Clara. Qual deles?'); },
+    send: async (to, text) => { sent.push({ to, text }); return { to }; },
+  };
+  const { o } = setup({ whatsappWeb, confirmContacts: true });
+  const chat = o.create('C:\\tmp');
+  const p = o.send(chat.id, { text: 'manda pra Ana que já saí', runId: 'k3' });
+  await tick();
+  calls[0].answer = 'Pronto.\n[[whatsapp para="Ana"]]\nJá saí!\n[[/whatsapp]]';
+  calls[0].finish();
+  const msg = await p;
+  assert.equal(sent.length, 0);
+  assert.equal(msg.whatsappDrafts[0].status, 'error');
+  assert.match(msg.text, /Ainda não enviei para Ana: .*Qual deles\?/);
+});
+
+test('a confirmação do contato vem ligada por padrão', () => {
+  assert.equal(DEFAULT_CONFIG.integrations.whatsapp.confirmContacts, true);
 });
 
 test('ação local responde sem chamar a IA', async () => {
