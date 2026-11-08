@@ -15,4 +15,33 @@ function contactRows() {
     .filter(({ name }) => name);
 }
 
-module.exports = { searchBox, contactRows };
+// Mensagens enviadas por ele na conversa aberta: classe .message-out ou data-id "true_..." (fromMe).
+function outgoingMessages() {
+  const seen = new Set();
+  const out = [];
+  for (const el of document.querySelectorAll('#main .message-out, #main [data-id^="true_"]')) {
+    const id = el.getAttribute('data-id') || el.closest('[data-id]')?.getAttribute('data-id');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, text: el.innerText || el.textContent || '' });
+  }
+  return out;
+}
+
+/**
+ * Diz se a mensagem saiu depois do Enter.
+ * O WhatsApp corta mensagens longas ("Ler mais"), formata listas e emojis e acrescenta a hora,
+ * então a comparação é pelo começo do texto, só com letras e números.
+ * Retorna { sent, composer: 'empty' | 'filled' | 'missing' }.
+ */
+function sendState(beforeIds, text) {
+  const loose = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9]/g, '');
+  const box = document.querySelector('#main footer [contenteditable="true"]');
+  const composer = !box ? 'missing' : (box.textContent || '').trim() ? 'filled' : 'empty';
+  const fresh = outgoingMessages().filter((m) => !beforeIds.includes(m.id));
+  const wanted = loose(text).slice(0, 40);
+  const sent = composer !== 'filled' && fresh.some((m) => !wanted || loose(m.text).includes(wanted));
+  return { sent, composer };
+}
+
+module.exports = { searchBox, contactRows, outgoingMessages, sendState };

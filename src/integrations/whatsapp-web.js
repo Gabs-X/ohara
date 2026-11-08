@@ -3,7 +3,7 @@
 // O Orchestrator acha o contato (resolve), mostra para ele confirmar e só então envia (send).
 const { BrowserWindow, session } = require('electron');
 const { pickContact } = require('./whatsapp');
-const { searchBox, contactRows } = require('./whatsapp-dom');
+const { searchBox, contactRows, outgoingMessages, sendState } = require('./whatsapp-dom');
 const { focusForInput, sendInput } = require('./whatsapp-input');
 
 const URL_WA = 'https://web.whatsapp.com/';
@@ -163,6 +163,21 @@ class WhatsAppWeb {
     return this.#js(`(() => { const h = document.querySelector('#main header span[title], #main header span[dir="auto"]'); return h ? (h.getAttribute('title') || h.textContent) : ''; })()`);
   }
 
+  // Espera a mensagem aparecer na conversa; se não aparecer a tempo, devolve o último estado visto.
+  async #sendState(before, text, timeoutMs = 15000) {
+    const code = `(() => { ${outgoingMessages.toString()}; return (${sendState.toString()})(${JSON.stringify(before)}, ${JSON.stringify(text)}); })()`;
+    const end = Date.now() + timeoutMs;
+    let state = { sent: false, composer: 'missing' };
+    while (Date.now() < end) {
+      try {
+        state = await this.#js(code);
+        if (state.sent) return state;
+      } catch { /* página atualizando */ }
+      await sleep(400);
+    }
+    return state;
+  }
+
   /**
    * Descobre para qual contato `to` iria, sem enviar: é o que a Ohara mostra para ele confirmar.
    * Retorna { to } com o nome exato da conversa (ou o número com DDI).
@@ -198,17 +213,12 @@ class WhatsAppWeb {
       if (!isNumber && norm(opened) !== norm(name)) throw new Error(`Abriu a conversa errada (${opened}); nada foi enviado.`);
       await this.#typeInto('#main footer [contenteditable="true"]', text);
       await sleep(300);
-      const messageIds = await this.#js(`[...document.querySelectorAll('#main .message-out')].map(e => e.getAttribute('data-id') || e.closest('[data-id]')?.getAttribute('data-id')).filter(Boolean)`);
+      const before = await this.#js(`(${outgoingMessages.toString()})().map(m => m.id)`);
       this.#pressEnter();
-      await this.#waitFor(`(() => {
-        const box = document.querySelector('#main footer [contenteditable="true"]');
-        const messages = [...document.querySelectorAll('#main .message-out')];
-        const normalize = s => String(s || '').replace(/\\s+/g, ' ').trim();
-        return box && !box.textContent.trim() && messages.some(e => {
-          const id = e.getAttribute('data-id') || e.closest('[data-id]')?.getAttribute('data-id');
-          return id && !${JSON.stringify(messageIds)}.includes(id) && normalize(e.innerText).includes(normalize(${JSON.stringify(text)}));
-        });
-      })()`, 15000, 'Não confirmei a saída da mensagem; confira a conversa antes de tentar novamente.');
+      const state = await this.#sendState(before, text);
+      // Sem balão reconhecido mas com o campo vazio: o WhatsApp aceitou o texto (ele só sai do campo quando é enviado).
+      if (!state.sent && state.composer === 'filled') throw new Error('A mensagem ficou no campo de texto e não saiu; confira a janela do WhatsApp.');
+      if (!state.sent && state.composer === 'missing') throw new Error('Não confirmei a saída da mensagem; confira a conversa antes de tentar novamente.');
       return { to: opened };
     });
     this.queue = job.catch(() => {});
