@@ -11,10 +11,17 @@ class JsonStore {
   }
 
   #load() {
+    let raw;
     try {
-      const raw = fs.readFileSync(this.file, 'utf8');
-      return { ...structuredClone(this.defaults), ...JSON.parse(raw) };
+      raw = fs.readFileSync(this.file, 'utf8');
     } catch {
+      return structuredClone(this.defaults); // primeira execução
+    }
+    try {
+      return { ...structuredClone(this.defaults), ...JSON.parse(raw.replace(/^﻿/, '')) };
+    } catch {
+      // Arquivo corrompido: guarda uma cópia antes que a próxima gravação o substitua pelos padrões.
+      try { fs.copyFileSync(this.file, `${this.file}.corrompido-${Date.now()}`); } catch { /* sem cópia */ }
       return structuredClone(this.defaults);
     }
   }
@@ -25,12 +32,31 @@ class JsonStore {
     this.timer = setTimeout(() => this.flush(), 300);
   }
 
+  // Nunca lança: roda em timer e no fechamento do app. Se a gravação falhar (disco cheio, arquivo
+  // preso pelo antivírus/indexador do Windows), tenta de novo em alguns segundos sem perder os dados da memória.
   flush() {
     clearTimeout(this.timer);
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-    fs.renameSync(tmp, this.file);
+    this.timer = null;
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
+      try {
+        fs.renameSync(tmp, this.file);
+      } catch (err) {
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(err.code)) throw err;
+        // O destino está aberto por outro programa: grava por cima em vez de trocar o arquivo.
+        fs.copyFileSync(tmp, this.file);
+        fs.rmSync(tmp, { force: true });
+      }
+      this.failures = 0;
+      return true;
+    } catch (err) {
+      this.failures = (this.failures || 0) + 1;
+      console.error(`Falha ao gravar ${path.basename(this.file)}:`, err.message);
+      if (this.failures <= 5) this.timer = setTimeout(() => this.flush(), 2000 * this.failures);
+      return false;
+    }
   }
 }
 

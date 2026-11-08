@@ -88,6 +88,8 @@ function takeSpeakable(buf, minLen = 60) {
 
 const escapeXml = (s) => s.replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
 
+const SYNTH_TIMEOUT_MS = 15_000;
+
 class NeuralTTS {
   constructor({ dir }) {
     this.dir = dir; // pasta temporária dos áudios
@@ -100,13 +102,19 @@ class NeuralTTS {
     const out = path.join(this.dir, `fala-${Date.now()}-${this.n++}`);
     fs.mkdirSync(out, { recursive: true });
     const tts = new MsEdgeTTS();
+    let timer;
+    // Conexão travada não pode deixar a fala presa: depois do limite, quem chamou usa a voz do Windows.
+    const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('a voz neural não respondeu a tempo')), SYNTH_TIMEOUT_MS); });
     try {
-      await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
-      const { audioFilePath } = await tts.toFile(out, escapeXml(text), rate ? { rate } : undefined);
-      if (!fs.existsSync(audioFilePath) || fs.statSync(audioFilePath).size < 1000) throw new Error('áudio vazio');
-      return audioFilePath;
+      return await Promise.race([timeout, (async () => {
+        await tts.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_96KBITRATE_MONO_MP3);
+        const { audioFilePath } = await tts.toFile(out, escapeXml(text), rate ? { rate } : undefined);
+        if (!fs.existsSync(audioFilePath) || fs.statSync(audioFilePath).size < 1000) throw new Error('áudio vazio');
+        return audioFilePath;
+      })()]);
     } finally {
-      tts.close();
+      clearTimeout(timer);
+      try { tts.close(); } catch { /* já fechada */ }
     }
   }
 

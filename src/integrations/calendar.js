@@ -123,14 +123,21 @@ class Calendar {
     return this.getConfig().integrations.calendarIcsUrl;
   }
 
-  async refresh(force = false) {
+  // Uma busca por vez, com tempo limite: sem isso, uma rede travada deixava a tela de Ajustes
+  // carregando para sempre e empilhava uma busca nova a cada minuto.
+  refresh(force = false) {
     if (!this.url) {
       this.events = [];
-      return;
+      return Promise.resolve();
     }
-    if (!force && Date.now() - this.fetchedAt < 15 * 60_000) return;
+    if (!force && Date.now() - this.fetchedAt < 15 * 60_000) return Promise.resolve();
+    if (!this.inflight) this.inflight = this.#fetch().finally(() => { this.inflight = null; });
+    return this.inflight;
+  }
+
+  async #fetch() {
     try {
-      const res = await fetch(this.url, { headers: { 'User-Agent': 'ohara' } });
+      const res = await fetch(this.url, { headers: { 'User-Agent': 'ohara' }, signal: AbortSignal.timeout(20_000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       const from = new Date();
@@ -140,7 +147,7 @@ class Calendar {
       this.fetchedAt = Date.now();
       this.error = null;
     } catch (err) {
-      this.error = err.message;
+      this.error = err.name === 'TimeoutError' ? 'a agenda não respondeu a tempo' : err.message;
     }
   }
 

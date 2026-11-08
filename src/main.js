@@ -8,7 +8,7 @@ if (process.argv.includes('--ohara-desktop-probe')) {
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DEFAULT_CONFIG } = require('./core/config');
+const { DEFAULT_CONFIG, simplifyConfig } = require('./core/config');
 const { JsonStore, deepMerge } = require('./core/store');
 const { UsageTracker } = require('./core/usage');
 const { Orchestrator } = require('./core/orchestrator');
@@ -20,8 +20,6 @@ const { Calendar } = require('./integrations/calendar');
 const { GitHub } = require('./integrations/github');
 const { Slack } = require('./integrations/slack');
 const { Whisper } = require('./integrations/whisper');
-const { WhatsApp, formatTasksMessage } = require('./integrations/whatsapp');
-const { WhatsAppWeb } = require('./integrations/whatsapp-web');
 const system = require('./core/system');
 const { trashOldInstallers, uninstallLegacyApp } = require('./core/cleanup');
 const { NeuralTTS, NEURAL_VOICES, isNeural, cleanForSpeech, splitForSpeech, takeSpeakable } = require('./integrations/tts');
@@ -52,6 +50,26 @@ if (!app.requestSingleInstanceLock()) {
 
 const dataDir = app.getPath('userData');
 const configFile = path.join(dataDir, 'config.json');
+
+// Erro inesperado em segundo plano (timer, evento de arquivo, rede): registra em erros.log e segue rodando,
+// em vez de abrir a caixa "A JavaScript error occurred in the main process" e deixar o app instável.
+function errorLog(kind, err) {
+  const file = path.join(dataDir, 'erros.log');
+  try {
+    if (fs.existsSync(file) && fs.statSync(file).size > 300_000) fs.renameSync(file, `${file}.old`);
+    fs.appendFileSync(file, `${new Date().toLocaleString('pt-BR')}  [${kind}] ${err?.stack || err}\n`);
+  } catch { /* registro é opcional */ }
+}
+process.on('uncaughtException', (err) => errorLog('exceção', err));
+process.on('unhandledRejection', (err) => errorLog('promessa', err));
+const guarded = (name, fn) => () => {
+  try {
+    const r = fn();
+    if (r && typeof r.catch === 'function') r.catch((err) => errorLog(name, err));
+  } catch (err) {
+    errorLog(name, err);
+  }
+};
 const capturesDir = path.join(dataDir, 'capturas');
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 
@@ -123,7 +141,7 @@ function loadConfig() {
   const user = decryptSecrets(readUserConfig());
   // Compatibilidade com a 0.1: "hotkey" virou "hotkeys.toggle".
   if (user.hotkey && !user.hotkeys) user.hotkeys = { toggle: user.hotkey };
-  return deepMerge(DEFAULT_CONFIG, user);
+  return simplifyConfig(deepMerge(DEFAULT_CONFIG, user));
 }
 
 // O que vai para a interface: segredos viram só "configurado".
@@ -300,7 +318,7 @@ function updateConfig(partial) {
   for (const p of SECRETS) if (getIn(partial, p) === '••••••') setIn(partial, p, undefined);
   const user = encryptSecrets(deepMerge(readUserConfig(), partial));
   fs.writeFileSync(configFile, JSON.stringify(user, null, 2));
-  config = deepMerge(DEFAULT_CONFIG, decryptSecrets(structuredClone(user)));
+  config = simplifyConfig(deepMerge(DEFAULT_CONFIG, decryptSecrets(structuredClone(user))));
   if (partial.hotkeys) registerHotkeys();
   if (partial.meetings) meetings.start();
   if (partial.integrations?.calendarIcsUrl !== undefined) calendar.refresh(true);
@@ -420,16 +438,10 @@ function notify(title, body, view = null, chatId = null) {
   n.show();
 }
 
-const whatsapp = new WhatsApp({ getConfig });
-const whatsappWeb = new WhatsAppWeb({ icon: ICON });
-const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, whatsapp, whatsappWeb, openExternal: (url) => shell.openExternal(url) });
+const disabledFeature = () => { throw new Error("Recurso desativado nesta versão da Ohara."); };
+const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url) });
 const meetings = new MeetingsService({
   store: meetingsStore, usage, getConfig, emit: send, notify: (t, b) => notify(t, b, 'meetings'),
-  // Demanda nova depois de uma reunião: avisa no seu WhatsApp.
-  onNewTasks: (m, tasks) => {
-    if (!whatsapp.configured || getConfig().integrations.whatsapp?.notifyMeetingTasks === false) return;
-    whatsapp.send(formatTasksMessage(m.title, tasks)).catch((err) => notify('WhatsApp', `Não consegui avisar das demandas: ${err.message}`));
-  },
 });
 const calendar = new Calendar({ getConfig });
 const github = new GitHub({ getConfig });
@@ -680,21 +692,6 @@ function createTray() {
         ...automations.snapshot().routines.slice(0, 6).map((r) => ({ label: `${r.icon} ${r.name}`, click: () => { showView('chat'); automations.runRoutine(r.id); } })),
         { type: 'separator' },
         {
-          // Liga/desliga a escuta contínua (microfone) sem abrir a janela.
-          label: 'Ouvir "Ohara" (microfone)',
-          type: 'checkbox',
-          checked: !!config.voice.wakeWord,
-          click: (item) => {
-            if (!item.checked) endVoiceSession(false);
-            updateConfig({ voice: { wakeWord: item.checked } });
-          },
-        },
-        {
-          label: 'Mostrar indicador de escuta', type: 'checkbox',
-          checked: config.voice.showListeningIndicator !== false,
-          click: (item) => updateConfig({ voice: { showListeningIndicator: item.checked } }),
-        },
-        {
           label: 'Iniciar com o Windows',
           type: 'checkbox',
           checked: app.getLoginItemSettings().openAtLogin,
@@ -726,10 +723,7 @@ function registerHotkeys() {
   bind('toggle', h.toggle, toggleWindow);
   bind('quick', h.quick, () => (quick?.isVisible() ? quick.hide() : showQuick({ mode: 'ask' })));
   bind('clipboard', h.clipboard, () => showQuick({ mode: 'clipboard', text: clipboard.readText() }));
-  bind('voice', h.voice, () => {
-    if (quick?.isVisible()) quick.webContents.send('quick:voice-toggle');
-    else showQuick({ mode: 'voice' });
-  });
+
 }
 
 async function captureScreen() {
@@ -829,7 +823,7 @@ function registerIpc() {
     return r.canceled ? [] : r.filePaths;
   });
   handle('screen:capture', () => captureScreen());
-  handle('voice:dictate', () => system.startVoiceTyping());
+  handle('voice:dictate', disabledFeature);
   handle('tts:speak', (text, voice) => speak(text, voice));
   handle('tts:stop', () => stopSpeaking());
   handle('tts:voices', () => NEURAL_VOICES);
@@ -879,28 +873,20 @@ function registerIpc() {
   handle('slack:status', () => slack.status());
   handleSafe('slack:send', (person, text) => slack.sendDM(person, text));
   handleSafe('slack:import', () => automations.importSlack());
-  handle('whatsapp:status', () => whatsapp.status());
-  handleSafe('whatsapp:send', (text) => whatsapp.send(text));
-  handle('whatsapp:webStatus', () => whatsappWeb.status());
-  handle('whatsapp:webConnect', () => whatsappWeb.connect());
-  handleSafe('whatsapp:confirm', (chatId, messageId, index) => orchestrator.confirmWhatsApp(chatId, messageId, index));
-  handleSafe('whatsapp:cancel', (chatId, messageId, index) => orchestrator.cancelWhatsApp(chatId, messageId, index));
+  handle('whatsapp:status', () => ({ configured: false, disabled: true }));
+  handle('whatsapp:webStatus', () => ({ connected: false, disabled: true }));
+  handleSafe('whatsapp:send', disabledFeature);
+  handleSafe('whatsapp:webConnect', disabledFeature);
+  handleSafe('whatsapp:confirm', disabledFeature);
+  handleSafe('whatsapp:cancel', disabledFeature);
   handle('whisper:status', () => whisper.status());
-  handleSafe('whisper:install', () => whisper.install((p) => send('whisper:progress', p)));
-  handleSafe('whisper:transcribe', async (wavBytes) => {
-    const file = path.join(os.tmpdir(), `ohara-voz-${Date.now()}.wav`);
-    fs.writeFileSync(file, Buffer.from(wavBytes));
-    try {
-      return await whisper.transcribe(file);
-    } finally {
-      fs.rmSync(file, { force: true });
-    }
-  });
+  handleSafe('whisper:install', disabledFeature);
+  handleSafe('whisper:transcribe', disabledFeature);
 
   // Janela rápida
   handle('quick:hide', () => quick?.hide());
   handle('quick:ask', (text) => showQuick({ mode: 'ask', text, autoSend: true }));
-  handleSafe('voice:heard', (wavBytes) => onVoiceHeard(wavBytes));
+  handleSafe('voice:heard', disabledFeature);
   handle('voice:end', () => endVoiceSession(false));
   handle('voice:log', (msg) => voiceLog(String(msg).slice(0, 500)));
   handle('voice:status', () => listeningStatus);
@@ -930,39 +916,38 @@ app.on('second-instance', () => toggleWindow());
 
 app.whenReady().then(() => {
   app.setAppUserModelId('com.gabsx.central-ia');
-  // Microfone só para as janelas do próprio app (gravação de voz para o Whisper).
-  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(permission === 'media' && wc.getURL().startsWith('file:')));
-  session.defaultSession.setPermissionCheckHandler((wc, permission) => permission === 'media' && !!wc?.getURL().startsWith('file:'));
+  // Sem captura de microfone nesta edição.
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
 
   enableAutoStartOnce();
   setTimeout(() => cleanupOldVersionsOnce().catch(() => {}), 5000);
   registerIpc();
   createWindow();
   createQuick();
-  createListeningIndicator();
+
   trayRebuild = createTray();
   registerHotkeys();
 
-  meetings.start();
-  automations.start();
+  guarded('reuniões', () => meetings.start())();
+  guarded('automações', () => automations.start())();
   // Classifica "aguardando outros" antigos (uma chamada rápida, só quando houver itens sem marca).
   setTimeout(() => insights.classifyWaiting().catch(() => {}), 20_000);
   calendar.refresh().catch(() => {});
   // Pauta antes das calls e amostras de cota para o gráfico.
   setInterval(() => {
     calendar.refresh().catch(() => {});
-    insights.checkPrep();
+    guarded('pauta', () => insights.checkPrep())();
   }, 60_000);
-  setInterval(() => usage.sampleLimits(), 5 * 60_000);
-  usage.sampleLimits();
+  setInterval(guarded('cota', () => usage.sampleLimits()), 5 * 60_000);
+  guarded('cota', () => usage.sampleLimits())();
 });
 
 app.on('before-quit', () => {
   quitting = true;
-  whatsappWeb.destroy();
   meetings.stop();
   automations.stop();
-  for (const s of stores) s.flush();
+  for (const s of stores) s.flush(); // flush não lança: um arquivo preso não impede salvar os outros
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', (e) => e.preventDefault());

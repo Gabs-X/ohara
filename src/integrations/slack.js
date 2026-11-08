@@ -15,14 +15,19 @@ class Slack {
   async call(method, params = {}, post = false) {
     if (!this.token) throw new Error('Slack não configurado: falta o token em Configurações.');
     const headers = { Authorization: `Bearer ${this.token}` };
+    const signal = AbortSignal.timeout(20_000); // rede travada não pode prender a tela de Ajustes
     let res;
-    if (post) {
-      res = await fetch(API + method, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(params) });
-    } else {
-      const qs = new URLSearchParams(params).toString();
-      res = await fetch(`${API}${method}?${qs}`, { headers });
+    try {
+      if (post) {
+        res = await fetch(API + method, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(params), signal });
+      } else {
+        const qs = new URLSearchParams(params).toString();
+        res = await fetch(`${API}${method}?${qs}`, { headers, signal });
+      }
+    } catch (err) {
+      throw new Error(err.name === 'TimeoutError' ? 'o Slack não respondeu a tempo' : `sem conexão com o Slack (${err.message})`);
     }
-    const data = await res.json();
+    const data = await res.json().catch(() => ({ ok: false, error: `resposta inválida (HTTP ${res.status})` }));
     if (!data.ok) throw new Error(`Slack ${method}: ${data.error}`);
     return data;
   }

@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
+const os = require('os');
+// Pasta que existe de verdade: a Ohara troca pastas apagadas pela padrão.
+const WORK = os.tmpdir();
 
 // IA falsa: cada chamada espera até ser liberada pelo teste.
 const calls = [];
@@ -34,6 +37,8 @@ function setup({ confirmContacts = false, ...extra } = {}) {
     usage,
     getConfig: () => {
       const c = structuredClone(DEFAULT_CONFIG);
+      c.integrations.whatsapp.enabled = true;
+      c.voice.commandsEnabled = true;
       c.integrations.whatsapp.confirmContacts = confirmContacts;
       return c;
     },
@@ -46,7 +51,7 @@ const tick = () => new Promise((r) => setTimeout(r, 10));
 
 test('aceita um segundo pedido enquanto o primeiro roda, em paralelo', async () => {
   const { o } = setup();
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p1 = o.send(chat.id, { text: 'explique a arquitetura do projeto em detalhes', runId: 'r1' });
   await tick();
   assert.equal(o.isRunning(chat.id), true);
@@ -72,7 +77,7 @@ test('aceita um segundo pedido enquanto o primeiro roda, em paralelo', async () 
 
 test('cancelar sem runId para todos os agentes da conversa', async () => {
   const { o } = setup();
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   o.send(chat.id, { text: 'tarefa 1 bem longa de análise', runId: 'a' });
   o.send(chat.id, { text: 'tarefa 2', runId: 'b' });
   await tick();
@@ -85,7 +90,7 @@ test('padrão: pedido para contato é enviado na hora, mesmo sem citar o WhatsAp
   const sent = [];
   const whatsappWeb = { send: async (to, text) => { sent.push({ to, text }); return { to: 'Vó Maria' }; } };
   const { o } = setup({ whatsappWeb });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'se apresenta pra minha vó', source: 'voice', runId: 'a1' });
   await tick();
   assert.match(calls[0].opts.systemPrompt, /ENVIA NA HORA/, 'ela sabe que pode mandar mesmo sem a palavra WhatsApp');
@@ -100,7 +105,7 @@ test('padrão: pedido para contato é enviado na hora, mesmo sem citar o WhatsAp
 test('padrão: se o envio falha, ela fala o motivo', async () => {
   const whatsappWeb = { send: async () => { throw new Error('Mais de um contato para "Ana": Ana Paula, Ana Clara. Diga o nome completo.'); } };
   const { o } = setup({ whatsappWeb });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'manda pra Ana que já saí', runId: 'a2' });
   await tick();
   calls[0].answer = 'Mando já.\n[[whatsapp para="Ana"]]\nJá saí!\n[[/whatsapp]]';
@@ -112,7 +117,7 @@ test('padrão: se o envio falha, ela fala o motivo', async () => {
 
 test('por voz, conversa que não era com ela é ignorada em silêncio', async () => {
   const { o } = setup();
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'Ela comprou a moto e deixou ele usar', source: 'voice', runId: 'i1' });
   await tick();
   assert.match(calls[0].opts.systemPrompt, /\[\[ignorar\]\]/);
@@ -126,7 +131,7 @@ test('com confirmação ligada, pedido para contato vira rascunho e só sai depo
   const sent = [];
   const whatsappWeb = { send: async (to, text) => { sent.push({ to, text }); return { to: 'João Silva' }; } };
   const { o } = setup({ whatsappWeb, confirmContacts: true });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'manda pro João no zap que vou atrasar 10 min', runId: 'w1' });
   await tick();
   assert.match(calls[0].opts.systemPrompt, /\[\[whatsapp para=/);
@@ -150,7 +155,7 @@ test('com confirmação, ela mostra o contato que achou e envia exatamente para 
     send: async (to, text) => { sent.push({ to, text }); return { to }; },
   };
   const { o } = setup({ whatsappWeb, confirmContacts: true });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'manda pro Alan que chego às 8', runId: 'k1' });
   await tick();
   assert.match(calls[0].opts.systemPrompt, /mostra a ele o nome exato/);
@@ -173,7 +178,7 @@ test('com confirmação, contato ambíguo não é enviado e ela pergunta qual é
     send: async (to, text) => { sent.push({ to, text }); return { to }; },
   };
   const { o } = setup({ whatsappWeb, confirmContacts: true });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'manda pra Ana que já saí', runId: 'k3' });
   await tick();
   calls[0].answer = 'Pronto.\n[[whatsapp para="Ana"]]\nJá saí!\n[[/whatsapp]]';
@@ -191,7 +196,7 @@ test('a confirmação do contato vem ligada por padrão', () => {
 test('ação local responde sem chamar a IA', async () => {
   const opened = [];
   const { o } = setup({ openExternal: async (u) => opened.push(u) });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const msg = await o.send(chat.id, { text: 'pesquisa no Google receita de bolo', runId: 'g1' });
   assert.equal(calls.length, 0);
   assert.equal(msg.provider, 'local');
@@ -200,7 +205,7 @@ test('ação local responde sem chamar a IA', async () => {
 
 test('oferece se alterar e, com o "sim", implementa no próprio repositório com o modelo forte', async () => {
   const { o } = setup();
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p1 = o.send(chat.id, { text: 'lê esse PDF pra mim', runId: 'm1' });
   await tick();
   assert.match(calls[0].opts.systemPrompt, /resolutiva/);
@@ -221,12 +226,12 @@ test('oferece se alterar e, com o "sim", implementa no próprio repositório com
   assert.equal(run.sessionId, undefined);
   calls[1].finish();
   await p2;
-  assert.equal(chat.cwd, 'C:\\tmp', 'a conversa continua na pasta dela');
+  assert.equal(chat.cwd, WORK, 'a conversa continua na pasta dela');
 });
 
 test('a oferta vale só para a resposta seguinte', async () => {
   const { o } = setup();
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p1 = o.send(chat.id, { text: 'manda um fax', runId: 'f1' });
   await tick();
   calls[0].answer = 'Não tenho fax.\n[[melhoria: enviar fax]]';
@@ -239,7 +244,7 @@ test('a oferta vale só para a resposta seguinte', async () => {
   await p2;
   const p3 = o.send(chat.id, { text: 'sim', runId: 'f3' });
   await tick();
-  assert.equal(calls[2].opts.cwd, 'C:\\tmp', '"sim" atrasado não dispara a automelhoria');
+  assert.equal(calls[2].opts.cwd, WORK, '"sim" atrasado não dispara a automelhoria');
   calls[2].finish();
   await p3;
 });
@@ -248,7 +253,7 @@ async function draftChat(extra = {}) {
   const sent = [];
   const whatsappWeb = { send: async (to, text) => { sent.push({ to, text }); return { to: 'Tata Souza' }; } };
   const { o, events } = setup({ whatsappWeb, confirmContacts: true, ...extra });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p = o.send(chat.id, { text: 'envia mensagem pra Tata no meu WhatsApp se apresentando', runId: 'd1' });
   await tick();
   calls[0].answer = 'Preparei a mensagem.\n[[whatsapp para="Tata"]]\nOi! Aqui é a Ohara.\n[[/whatsapp]]';
@@ -307,7 +312,7 @@ test('"sim" com oferta de melhoria aberta é para a melhoria, não para o envio'
   const sent = [];
   const whatsappWeb = { send: async (to, text) => { sent.push({ to, text }); return { to }; } };
   const { o } = setup({ whatsappWeb, confirmContacts: true });
-  const chat = o.create('C:\\tmp');
+  const chat = o.create(WORK);
   const p1 = o.send(chat.id, { text: 'manda pra Tata no zap um oi', runId: 's1' });
   await tick();
   calls[0].answer = 'Preparei.\n[[whatsapp para="Tata"]]\nOi!\n[[/whatsapp]]\nPosso aprender a enviar sozinha.\n[[melhoria: enviar sem confirmação]]';
@@ -319,4 +324,69 @@ test('"sim" com oferta de melhoria aberta é para a melhoria, não para o envio'
   assert.equal(calls[1].opts.cwd, 'C:\\repositorios\\Projetos-Pessoais\\ohara');
   calls[1].finish();
   await p2;
+});
+
+
+test('edicao simples bloqueia voz e adaptadores de WhatsApp mesmo com dados antigos', async () => {
+  const { simplifyConfig } = require('../src/core/config');
+  const config = simplifyConfig(structuredClone(DEFAULT_CONFIG));
+  let sends = 0;
+  const adapter = { send: async () => { sends++; } };
+  const { o } = setup({ getConfig: () => config, whatsapp: adapter, whatsappWeb: adapter });
+  const chat = o.create(WORK);
+  await assert.rejects(o.send(chat.id, { text: 'oi', source: 'voice' }), /voz desativados/);
+  assert.equal(calls.length, 0);
+  chat.messages.push({ id: 'old', role: 'assistant', at: Date.now(), whatsappDrafts: [{ to: 'Ana', text: 'Oi', status: 'pending' }] });
+  await assert.rejects(o.confirmWhatsApp(chat.id, 'old', 0), /indispon/);
+  const pending = o.send(chat.id, { text: 'envia a mensagem', runId: 'disabled' });
+  await tick();
+  assert.match(calls[0].opts.systemPrompt, /comandos de voz foram desativados/);
+  calls[0].answer = 'Texto para copiar.';
+  calls[0].finish();
+  await pending;
+  assert.equal(sends, 0);
+});
+
+test('pasta da conversa apagada: volta para a pasta padrão em vez de falhar com "spawn ENOENT"', async () => {
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.defaultCwd = WORK;
+  const { o } = setup({ getConfig: () => config });
+  const chat = o.create(path.join(WORK, `ohara-pasta-que-nao-existe-${Date.now()}`));
+  chat.sessions = { claude: { id: 'velha', syncedUpTo: 0 } };
+  const pending = o.send(chat.id, { text: 'qual a capital da França?', runId: 'cwd' });
+  await tick();
+  assert.equal(calls[0].opts.cwd, WORK);
+  assert.equal(calls[0].opts.sessionId, undefined, 'a sessão presa à pasta antiga é descartada');
+  calls[0].finish();
+  const msg = await pending;
+  assert.equal(chat.cwd, WORK);
+  assert.ok(msg.route.reasons.some((r) => /não existe mais/.test(r)));
+});
+
+test('envio de WhatsApp desligado: bloco que a IA montar vira texto para copiar', async () => {
+  const { simplifyConfig } = require('../src/core/config');
+  const config = simplifyConfig(structuredClone(DEFAULT_CONFIG));
+  config.defaultCwd = WORK;
+  const { o } = setup({ getConfig: () => config });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'escreve um recado pra Ana', runId: 'wa-off' });
+  await tick();
+  calls[0].answer = 'Aqui está:\n[[whatsapp para="Ana"]]\nOi, Ana! Chego às 19h.\n[[/whatsapp]]';
+  calls[0].finish();
+  const msg = await pending;
+  assert.doesNotMatch(msg.text, /\[\[whatsapp/);
+  assert.match(msg.text, /Mensagem para Ana/);
+  assert.match(msg.text, /Chego às 19h/);
+  assert.equal(msg.whatsappDrafts, undefined);
+});
+
+test('falha ao registrar o uso não impede o fim da resposta', async () => {
+  const { o, events } = setup();
+  o.usage.summary = () => { throw new Error('disco cheio'); };
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'oi', runId: 'uso' });
+  await tick();
+  calls[0].finish();
+  await pending;
+  assert.ok(events.some(([ch]) => ch === 'chat:done'));
 });

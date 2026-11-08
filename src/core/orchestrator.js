@@ -1,6 +1,7 @@
 // Orquestrador: recebe um pedido, escolhe a rota, chama o provedor e
 // mantém o contexto quando a conversa alterna entre Claude e Codex.
 const crypto = require('crypto');
+const fs = require('fs');
 const { route, classify, learnPreferences } = require('./router');
 const { runClaude } = require('./providers/claude');
 const { runCodex } = require('./providers/codex');
@@ -100,8 +101,8 @@ class Orchestrator {
   constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null }) {
     this.openExternal = openExternal; // abre URLs/URIs (shell.openExternal); habilita as ações locais
 
-    this.whatsapp = whatsapp; // CallMeBot: mensagens para o próprio Gabriel (opcional)
-    this.whatsappWeb = whatsappWeb; // WhatsApp Web: mensagens para contatos, sempre com confirmação (opcional)
+    this.whatsapp = getConfig().integrations.whatsapp?.enabled === false ? null : whatsapp; // CallMeBot: mensagens para o próprio Gabriel (opcional)
+    this.whatsappWeb = getConfig().integrations.whatsapp?.enabled === false ? null : whatsappWeb; // WhatsApp Web: mensagens para contatos, sempre com confirmação (opcional)
     this.chats = chatsStore; // JsonStore { chats: [] }
     this.prefs = prefsStore; // JsonStore { overrides: [] }
     this.usage = usage;
@@ -250,6 +251,7 @@ class Orchestrator {
   // o novo vai em paralelo, numa sessão separada que recebe o histórico como contexto.
   async send(chatId, { text, images = [], override = 'auto', permissionMode, source = 'chat', runId: clientRunId, onDelta }) {
     const config = this.getConfig();
+    if (source === 'voice' && config.voice.commandsEnabled === false) throw new Error('Comandos de voz desativados.');
     const chat = this.get(chatId);
     if (!chat) throw new Error('Conversa não encontrada');
 
@@ -308,6 +310,15 @@ class Orchestrator {
     const ac = new AbortController();
     this.running.set(runId, { chatId, ac });
 
+    // Pasta da conversa apagada ou renomeada: o Windows recusaria abrir o agente nela
+    // (e o erro aparece como "spawn claude ENOENT"). Volta para a pasta padrão.
+    if (!improvement && chat.cwd && !fs.existsSync(chat.cwd) && config.defaultCwd && fs.existsSync(config.defaultCwd)) {
+      decision.reasons = [...(decision.reasons || []), `a pasta ${chat.cwd} não existe mais: usando ${config.defaultCwd}`];
+      chat.cwd = config.defaultCwd;
+      chat.sessions = {};
+      this.emit('chats:changed', {});
+    }
+
     // Agente paralelo não reaproveita a sessão (ela está em uso): começa limpo, com o histórico.
     // A automelhoria também roda à parte, porque trabalha em outra pasta (o repositório da Ohara).
     const cwd = improvement ? config.selfRepo : chat.cwd;
@@ -332,6 +343,7 @@ class Orchestrator {
     const extra = [
       source === 'voice' ? VOICE_NOTE : '',
       parallel ? PARALLEL_NOTE : '',
+      config.integrations.whatsapp?.enabled === false ? 'O envio de WhatsApp e os comandos de voz foram desativados a pedido do Gabriel. Não envie mensagens, não use o navegador para contornar isso e não gere blocos [[whatsapp]]. Você pode redigir textos para ele copiar.' : '',
       this.whatsappWeb ? CONTACTS_NOTE(confirmContacts) : '',
       askWhatsApp ? WHATSAPP_NOTE : '',
     ].filter(Boolean).join('\n');
@@ -382,7 +394,16 @@ class Orchestrator {
       assistant.text = '(ignorado: não parecia um pedido para a Ohara)';
     }
     if ((askWhatsApp || hasDraft) && assistant.text && !assistant.error) {
-      await this.#handleWhatsApp(assistant, { toSelf: askWhatsApp, chat, autoSend: !confirmContacts });
+      try {
+        await this.#handleWhatsApp(assistant, { toSelf: askWhatsApp, chat, autoSend: !confirmContacts });
+      } catch (err) {
+        assistant.whatsapp = { sent: false, error: err.message };
+      }
+    }
+    // Envio desligado, mas a IA ainda montou um bloco (ex.: por causa do histórico): mostra o texto para copiar.
+    if (!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text)) {
+      const { text: rest, drafts } = extractDrafts(assistant.text);
+      assistant.text = [rest, ...drafts.map((d) => `**Mensagem para ${d.to}** (o envio pelo WhatsApp está desligado; copie e envie):\n\n${d.text}`)].filter(Boolean).join('\n\n');
     }
 
     // Oferta de automelhoria: guarda para o próximo "sim" e tira a marcação do texto.
@@ -400,11 +421,16 @@ class Orchestrator {
     chat.updatedAt = Date.now();
     this.chats.save();
 
-    if (result.tokens && (result.tokens.input || result.tokens.output)) {
-      this.usage.record(decision.provider, assistant.model, result.tokens, source);
+    // Contabilidade de uso é secundária: uma falha aqui não pode impedir o "chat:done" (a tela ficaria presa em "rodando").
+    try {
+      if (result.tokens && (result.tokens.input || result.tokens.output)) {
+        this.usage.record(decision.provider, assistant.model, result.tokens, source);
+      }
+      if (decision.provider === 'codex') this.usage.refreshCodexLimits();
+      this.emit('usage:update', this.usage.summary());
+    } catch (err) {
+      console.error('Falha ao registrar o uso:', err);
     }
-    if (decision.provider === 'codex') this.usage.refreshCodexLimits();
-    this.emit('usage:update', this.usage.summary());
     this.emit('chat:done', { chatId, runId, message: assistant, source, running: this.isRunning(chatId) });
     return assistant;
   }

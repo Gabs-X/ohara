@@ -1,15 +1,13 @@
-/* global central, esc, toast, callSafe, applyListening */
+/* global central, esc, toast, callSafe */
 // Tela "Ajustes": integrações (agenda, GitHub, Slack), voz, atalhos, reuniões e geral.
 
 async function renderSettings() {
-  const [cfg, hk, cal, sl, ws, login, wa] = await Promise.all([
+  const [cfg, hk, cal, sl, login] = await Promise.all([
     central.getConfig(),
     central.hotkeyStatus(),
     central.calendarStatus(),
     central.slackStatus(),
-    central.whisperStatus(),
     central.loginItem(),
-    central.whatsappStatus(),
   ]);
   const body = document.getElementById('settings-body');
   const ok = (good, text) => `<span class="status ${good ? 'good' : 'bad'}">${good ? '●' : '○'} ${esc(text)}</span>`;
@@ -28,7 +26,7 @@ async function renderSettings() {
       <label class="check"><input id="dev-preflight" type="checkbox" ${cfg.codex?.developmentPreflight !== false ? 'checked' : ''}> Verificar acessos no início das tarefas no código da Ohara</label>
       <div class="row"><button class="btn small-btn" id="dev-save">Salvar permissões</button><button class="btn small-btn" id="dev-check">Verificar acessos agora</button></div>
       <p class="muted small">A verificação abaixo roda pelo aplicativo e abre uma janela de teste por alguns segundos. A sessão do Codex pode ter restrições adicionais, verificadas no início da tarefa.</p>
-      <p id="dev-result" class="small" role="status" style="white-space:pre-line"></p>
+      <p id="dev-result" class="small pre-line" role="status"></p>
     </section>
     <section class="section">
       <h2>📅 Agenda</h2>
@@ -54,32 +52,7 @@ async function renderSettings() {
     </section>
 
     <section class="section">
-      <h2>📱 WhatsApp</h2>
-      <h3>Mensagens para você</h3>
-      <p class="muted small">Quando você pedir (“me manda no WhatsApp o resumo da reunião”) e quando uma reunião gerar demandas novas para você. Usa o <b>CallMeBot</b>: siga o passo a passo do <a href="https://www.callmebot.com/blog/free-api-whatsapp-messages/" target="_blank">site do CallMeBot</a> (você manda uma mensagem de autorização para o número deles) e cole aqui a chave (apikey) recebida. A chave fica criptografada neste PC.</p>
-      <div class="row"><input id="wa-phone" placeholder="Seu número com DDI, ex.: +5511999999999" value="${esc(I.whatsapp?.phone || '')}"><input id="wa-key" type="password" placeholder="apikey" value="${I.whatsapp?.apikeySet ? '••••••' : ''}"><button class="btn small-btn" id="wa-save">Salvar</button>${wa.configured ? '<button class="btn small-btn" id="wa-test">Enviar teste</button><button class="btn small-btn" id="wa-clear">Remover</button>' : ''}</div>
-      <p>${wa.configured ? ok(true, `configurado para ${wa.phone}`) : ok(false, 'não configurado')}</p>
-      <label class="check"><input type="checkbox" id="wa-meetings" ${I.whatsapp?.notifyMeetingTasks !== false ? 'checked' : ''}> Avisar no WhatsApp quando uma reunião gerar demandas novas para mim</label>
-
-      <h3>Mensagens para os seus contatos</h3>
-      <p class="muted small">Peça “manda pro João no zap que vou atrasar”: a Ohara escreve a mensagem e mostra um cartão para você <b>confirmar antes de enviar</b>. Usa o seu WhatsApp Web numa janela da Ohara: conecte uma vez escaneando o QR Code (WhatsApp no celular → Aparelhos conectados). Não é a API oficial do WhatsApp; em tese, a conta pode sofrer restrição.</p>
-      <label class="check"><input type="checkbox" id="wa-confirm" ${I.whatsapp?.confirmContacts !== false ? 'checked' : ''}> Confirmar o contato antes de enviar (a Ohara diz qual contato achou e espera seu “confirmado”)</label>
-      <div class="row"><button class="btn small-btn" id="waw-connect">Conectar / abrir WhatsApp Web</button><button class="btn small-btn" id="waw-check">Verificar conexão</button><span id="waw-state" class="small"></span></div>
-    </section>
-
-    <section class="section">
-      <h2>🎙️ Voz</h2>
-      <p class="muted small">Transcrição local com o whisper.cpp (offline, entende pt-BR). Na primeira vez baixa o programa oficial (GitHub ggml-org/whisper.cpp) e o modelo escolhido (Hugging Face).</p>
-      <p>${ws.installed ? ok(true, `instalado · modelo ${ws.modelName}`) : ok(false, ws.installing ? 'instalando…' : `não instalado${ws.exe ? ' (falta o modelo)' : ''}`)}</p>
-      <div class="row">
-        <select id="w-model">${[['tiny', 'tiny · 75 MB, mais rápido'], ['base', 'base · 148 MB, equilibrado'], ['small', 'small · 488 MB, mais preciso']].map(([v, l]) => `<option value="${v}" ${cfg.voice.whisperModel === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
-        <button class="btn small-btn" id="w-install">${ws.installed ? 'Reinstalar/trocar modelo' : 'Instalar'}</button>
-      </div>
-      <p id="w-progress" class="small muted"></p>
-      <label class="check"><input type="checkbox" id="w-wake" ${cfg.voice.wakeWord ? 'checked' : ''} ${ws.installed ? '' : 'disabled'}> Escuta contínua: diga <b>“Ohara”</b>, ela responde e a conversa fica aberta (fale os pedidos sem repetir o nome; “valeu” encerra) <span class="muted small">(<span id="listen-state">—</span>; passe o mouse para ver as últimas falas ouvidas)</span></label>
-      <label class="check"><input type="checkbox" id="w-indicator" ${cfg.voice.showListeningIndicator !== false ? 'checked' : ''}> Mostrar indicador flutuante de escuta, mesmo com a Ohara minimizada</label>
-      <p class="muted small">Verde: ouvindo. Amarelo: abrindo ou pausada enquanto respondo. Cinza: desligado. Vermelho: erro. Arraste o indicador pelo título; use Ligar/Desligar para controlar o microfone.</p>
-      <label class="check"><input type="checkbox" id="w-autosend" ${cfg.voice.autoSendVoice ? 'checked' : ''}> Na janela rápida, enviar assim que terminar de transcrever</label>
+      <h2>Leitura em voz alta</h2>
       <label class="check"><input type="checkbox" id="w-speak" ${cfg.voice.speakReplies ? 'checked' : ''}> Ler respostas em voz alta</label>
       <label>Voz da Ohara<div class="row">
         <select id="w-tts">${[
@@ -99,7 +72,6 @@ async function renderSettings() {
         ['toggle', 'Mostrar/esconder a Ohara'],
         ['quick', 'Janela rápida'],
         ['clipboard', 'Janela rápida com o que você copiou'],
-        ['voice', 'Falar (gravar e transcrever)'],
       ].map(([k, l]) => `<tr><td>${l}</td><td><input data-hk="${k}" value="${esc(cfg.hotkeys[k] || '')}"></td><td>${hk[k] ? ok(hk[k] === 'ok', hk[k]) : ''}</td></tr>`).join('')}</tbody></table>
       <button class="btn small-btn" id="hk-save">Salvar atalhos</button>
     </section>
@@ -128,8 +100,13 @@ async function renderSettings() {
 
   const $s = (sel) => body.querySelector(sel);
   const save = async (partial, msg = 'Salvo.') => {
-    await central.setConfig(partial);
-    toast(msg);
+    try {
+      await central.setConfig(partial);
+      toast(msg);
+    } catch (err) {
+      toast(`Não salvei: ${String(err.message || err).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`, 'error');
+      throw err;
+    }
   };
   $s('#dev-save').addEventListener('click', () => callSafe((async () => {
     await save({ codex: { developmentPermissions: $s('#dev-permissions').value, developmentPreflight: $s('#dev-preflight').checked } }, 'Permissões salvas para as próximas execuções.');
@@ -175,51 +152,12 @@ async function renderSettings() {
     renderSettings();
   });
   $s('#sl-clear')?.addEventListener('click', async () => { await save({ integrations: { slack: { token: '' } } }, 'Slack desconectado.'); renderSettings(); });
-  // WhatsApp
-  $s('#wa-save').addEventListener('click', async () => {
-    const phone = $s('#wa-phone').value.trim().replace(/[\s()-]/g, '');
-    const key = $s('#wa-key').value.trim();
-    if (!/^\+\d{10,15}$/.test(phone)) return toast('Informe o número com DDI, ex.: +5511999999999', 'error');
-    const partial = { integrations: { whatsapp: { phone } } };
-    if (key && key !== '••••••') partial.integrations.whatsapp.apikey = key;
-    await save(partial, 'WhatsApp salvo.');
-    renderSettings();
-  });
-  $s('#wa-test')?.addEventListener('click', async () => {
-    const r = await callSafe(central.whatsappSend('✅ Teste da Ohara: o WhatsApp está funcionando.'), 'WhatsApp: ');
-    if (r != null) toast('Mensagem de teste enviada. Confira o seu WhatsApp.');
-  });
-  $s('#wa-clear')?.addEventListener('click', async () => { await save({ integrations: { whatsapp: { phone: '', apikey: '' } } }, 'WhatsApp removido.'); renderSettings(); });
-  $s('#wa-meetings').addEventListener('change', (e) => save({ integrations: { whatsapp: { notifyMeetingTasks: e.target.checked } } }));
-  $s('#wa-confirm').addEventListener('change', (e) => save({ integrations: { whatsapp: { confirmContacts: e.target.checked } } }));
-  $s('#waw-connect').addEventListener('click', () => central.whatsappWebConnect());
-  $s('#waw-check').addEventListener('click', async () => {
-    const st = $s('#waw-state');
-    st.textContent = 'Verificando…';
-    const r = await central.whatsappWebStatus();
-    st.innerHTML = r.connected ? ok(true, 'conectado') : ok(false, r.loading ? 'não respondeu; abra o WhatsApp Web e confira' : 'não conectado: clique em Conectar e escaneie o QR Code');
-  });
-
   $s('#sl-import')?.addEventListener('click', async () => {
     const n = await callSafe(central.slackImport(), 'Slack: ');
     if (n != null) toast(`${n} demanda(s) importada(s).`);
   });
 
-  // Voz
-  $s('#w-install').addEventListener('click', async () => {
-    await central.setConfig({ voice: { whisperModel: $s('#w-model').value } });
-    $s('#w-install').disabled = true;
-    $s('#w-progress').textContent = 'Baixando…';
-    const r = await central.whisperInstall();
-    if (!r.ok) toast(`Whisper: ${r.error}`, 'error');
-    else toast('Whisper instalado.');
-    renderSettings();
-  });
-  $s('#w-wake').addEventListener('change', async (e) => {
-    await central.setConfig({ voice: { wakeWord: e.target.checked } });
-  });
-  $s('#w-autosend').addEventListener('change', (e) => save({ voice: { autoSendVoice: e.target.checked } }));
-  $s('#w-indicator').addEventListener('change', (e) => save({ voice: { showListeningIndicator: e.target.checked } }));
+  // Leitura em voz alta
   $s('#w-tts').addEventListener('change', (e) => save({ voice: { ttsVoice: e.target.value } }, 'Voz salva.'));
   $s('#w-tts-test').addEventListener('click', () =>
     central.speak('Oi, Gabriel! Eu sou a Ohara. Abri o Spotify pra você e já deixei o resumo da reunião no painel de demandas.', $s('#w-tts').value),
@@ -260,7 +198,3 @@ async function renderSettings() {
   $s('#g-save').addEventListener('click', () => save({ outputDir: $s('#g-out').value.trim(), workspaceRoot: $s('#g-root').value.trim(), claude: { configDir: $s('#g-claude-dir').value.trim() } }));
 }
 
-central.onWhisperProgress((p) => {
-  const el = document.getElementById('w-progress');
-  if (el) el.textContent = `Baixando ${p.step}… ${Math.round((p.pct || 0) * 100)}%`;
-});

@@ -134,14 +134,11 @@ function fillAssistant(wrap, m, { live = false } = {}) {
     : '';
   const par = m.parallel ? '<span class="tag parallel" title="Rodou ao mesmo tempo que outra tarefa desta conversa">⫽ paralelo</span>' : '';
   meta.innerHTML = `${providerTag(m)}${par}<span title="${escapeHtml(reasons)}">${escapeHtml(m.route?.label || '')}</span>${tokens ? `<span>${tokens}</span>` : ''}${wa}${
-    live ? '' : '<button class="act" data-a="copy" title="Copiar">⧉</button><button class="act" data-a="speak" title="Ler em voz alta">🔊</button><button class="act" data-a="whatsapp" title="Enviar para o meu WhatsApp">📱</button>'
+    live ? '' : '<button class="act" data-a="copy" title="Copiar">⧉</button><button class="act" data-a="speak" title="Ler em voz alta">🔊</button>'
   }`;
   meta.querySelector('[data-a=copy]')?.addEventListener('click', () => navigator.clipboard.writeText(m.text || ''));
   meta.querySelector('[data-a=speak]')?.addEventListener('click', () => central.speak(m.text || ''));
-  meta.querySelector('[data-a=whatsapp]')?.addEventListener('click', async () => {
-    const r = await callSafe(central.whatsappSend(m.text || ''), 'WhatsApp: ');
-    if (r != null) toast('Enviado para o seu WhatsApp.');
-  });
+
 
   const tools = wrap.querySelector('.tools');
   const list = m.tools || [];
@@ -166,7 +163,7 @@ function fillAssistant(wrap, m, { live = false } = {}) {
       }),
     );
   }
-  if (!live) renderDrafts(wrap, m);
+
   if (!live) renderImprovementOffer(wrap, m);
 }
 
@@ -183,36 +180,6 @@ function renderImprovementOffer(wrap, m) {
     el.input.value = 'Sim, pode se alterar.';
     sendMessage();
   });
-  wrap.appendChild(box);
-}
-
-// Mensagem para contato: só sai depois do clique em "Enviar".
-function renderDrafts(wrap, m) {
-  wrap.querySelector('.wa-drafts')?.remove();
-  if (!m.whatsappDrafts?.length) return;
-  const box = document.createElement('div');
-  box.className = 'wa-drafts';
-  const label = { pending: 'aguardando sua confirmação', sending: 'enviando…', sent: 'enviada', cancelled: 'cancelada', error: 'não enviada' };
-  box.innerHTML = m.whatsappDrafts
-    .map((d, i) => `<div class="wa-draft ${d.status}">
-      <div class="wa-head">📱 WhatsApp para <b>${escapeHtml(d.sentTo || d.contact || d.to)}</b>${d.contact && !d.sentTo && d.contact !== d.to ? ` <span class="muted small">(você disse “${escapeHtml(d.to)}”)</span>` : ''} <span class="muted small">· ${label[d.status] || d.status}</span></div>
-      <div class="wa-text">${escapeHtml(d.text)}</div>
-      ${d.error ? `<p class="error small">⚠️ ${escapeHtml(d.error)}</p>` : ''}
-      ${d.status === 'pending' || d.status === 'error' ? `<div class="row"><button class="btn small-btn primary" data-wa="send" data-i="${i}">${d.status === 'error' ? 'Tentar de novo' : 'Enviar'}</button><button class="btn small-btn" data-wa="cancel" data-i="${i}">Cancelar</button></div>` : ''}
-    </div>`)
-    .join('');
-  box.querySelectorAll('[data-wa]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      const i = Number(b.dataset.i);
-      b.disabled = true;
-      if (b.dataset.wa === 'send') {
-        const r = await central.whatsappConfirm(state.chatId, m.id, i);
-        if (r?.ok) toast(`Enviada para ${r.data.sentTo || r.data.to}.`);
-      } else {
-        await central.whatsappCancel(state.chatId, m.id, i);
-      }
-    }),
-  );
   wrap.appendChild(box);
 }
 
@@ -327,7 +294,7 @@ central.onDone(async ({ chatId, runId, message, source }) => {
       fillAssistant(live.wrap, live.msg);
       scrollBottom();
       const fresh = await central.getChat(chatId);
-      el.title.textContent = fresh.title;
+      if (fresh) el.title.textContent = fresh.title; // a conversa pode ter sido apagada enquanto rodava
     }
   } else if (chatId === state.chatId) {
     // Terminou uma conversa que foi reaberta no meio da execução.
@@ -389,45 +356,6 @@ $('#btn-image').addEventListener('click', async () => {
   files.forEach((p) => state.attachments.push({ path: p }));
   renderAttachments();
   schedulePreview();
-});
-
-// 🎤: com o Whisper instalado grava e transcreve aqui mesmo; sem ele, abre o ditado do Windows (Win+H).
-let recording = null;
-$('#btn-voice').addEventListener('click', async () => {
-  const btn = $('#btn-voice');
-  if (recording) {
-    recording.stop();
-    return;
-  }
-  const ws = await central.whisperStatus();
-  if (!ws.installed) {
-    el.input.focus();
-    central.dictate();
-    return;
-  }
-  try {
-    recording = await Voice.record({ onLevel: (l) => (btn.style.boxShadow = `0 0 0 ${Math.round(l * 6)}px rgba(255,92,122,.5)`) });
-    btn.classList.add('rec');
-    btn.title = 'Gravando… clique para parar';
-    const bytes = await recording.done;
-    btn.classList.remove('rec');
-    btn.style.boxShadow = '';
-    btn.title = 'Falar';
-    recording = null;
-    if (!bytes) return toast('Não ouvi nada.');
-    btn.textContent = '⏳';
-    const text = await Voice.transcribe(bytes);
-    btn.textContent = '🎤';
-    el.input.value = (el.input.value ? `${el.input.value} ` : '') + text;
-    autosize();
-    schedulePreview();
-    el.input.focus();
-  } catch (err) {
-    recording = null;
-    btn.textContent = '🎤';
-    btn.classList.remove('rec');
-    toast(`Voz: ${err.message}`, 'error');
-  }
 });
 
 function alertInline(text) {

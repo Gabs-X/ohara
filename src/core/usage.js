@@ -61,10 +61,11 @@ class UsageTracker {
   }
 
   // Lê o "rate_limits" mais recente das sessões do Codex.
+  // Nunca lança: é chamado no fim de cada resposta e um erro aqui impediria o "chat:done".
   refreshCodexLimits() {
-    const file = latestCodexSession();
-    if (!file) return this.store.data.limits.codex;
     try {
+      const file = latestCodexSession();
+      if (!file) return this.store.data.limits.codex;
       const text = readTail(file, 256 * 1024);
       const lines = text.split('\n').reverse();
       for (const line of lines) {
@@ -141,7 +142,12 @@ function latestCodexSession() {
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith('.jsonl')) {
         const full = path.join(dir, e.name);
-        const mtime = fs.statSync(full).mtimeMs;
+        let mtime;
+        try {
+          mtime = fs.statSync(full).mtimeMs;
+        } catch {
+          continue; // sessão apagada no meio da leitura
+        }
         if (!best || mtime > best.mtime) best = { full, mtime };
       }
     }

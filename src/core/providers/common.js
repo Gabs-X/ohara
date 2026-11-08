@@ -1,4 +1,5 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
 const readline = require('readline');
 
 // Executa um processo, entrega cada linha JSON do stdout para onJson e
@@ -36,17 +37,33 @@ function runJsonl({ cmd, args, cwd, input, env, onJson, signal }) {
     });
 
     const onAbort = () => killTree(child.pid);
-    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
 
-    child.on('error', reject);
+    child.on('error', (err) => {
+      signal?.removeEventListener('abort', onAbort);
+      reject(friendlySpawnError(err, cmd, cwd));
+    });
     child.on('close', (code) => {
       signal?.removeEventListener('abort', onAbort);
       resolve({ code, stderr, aborted: !!signal?.aborted });
     });
 
+    // Processo que morre (ou nem abre) antes de ler a entrada gera EPIPE no stdin;
+    // sem este handler o erro derruba o processo principal do app.
+    child.stdin.on('error', () => {});
     if (input != null) child.stdin.write(input);
     child.stdin.end();
   });
+}
+
+// "spawn claude ENOENT" vale tanto para programa ausente quanto para pasta de trabalho inexistente.
+function friendlySpawnError(err, cmd, cwd) {
+  if (err?.code !== 'ENOENT') return err;
+  const msg = cwd && !fs.existsSync(cwd)
+    ? `A pasta de trabalho "${cwd}" não existe mais. Escolha outra pasta no topo da conversa.`
+    : `Não encontrei o programa "${cmd}". Confira se ele está instalado e no PATH do Windows.`;
+  return Object.assign(new Error(msg), { code: err.code });
 }
 
 // No Windows, child.kill() não derruba os subprocessos: usa taskkill /T.

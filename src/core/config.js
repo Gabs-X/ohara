@@ -14,7 +14,7 @@ const DEFAULT_CONFIG = {
     toggle: 'CommandOrControl+Space', // mostra/esconde a janela principal
     quick: 'Alt+Space', // janela rápida
     clipboard: 'CommandOrControl+Alt+Space', // janela rápida com o conteúdo copiado
-    voice: 'CommandOrControl+Alt+V', // fala → texto (Whisper)
+    voice: '', // fala → texto (Whisper)
   },
 
   claude: {
@@ -94,14 +94,16 @@ const DEFAULT_CONFIG = {
     },
     // Mensagens para o seu próprio WhatsApp via CallMeBot (a chave fica criptografada).
     whatsapp: {
+      enabled: false,
       phone: '', // com DDI, ex.: +5511999999999
       apikey: '',
-      notifyMeetingTasks: true, // avisa quando uma reunião gera demandas novas para você
+      notifyMeetingTasks: false, // avisa quando uma reunião gera demandas novas para você
       confirmContacts: true, // mensagem para contato: mostra o contato achado e só envia depois que você confirmar
     },
   },
 
   voice: {
+    commandsEnabled: false,
     ttsRate: '+15%', // velocidade da voz neural (+0% = normal)
     conversationTimeoutSec: 25, // depois de cada resposta, espera o próximo pedido por esse tempo
     ttsVoice: 'pt-BR-FranciscaNeural', // voz neural (internet); 'Microsoft Maria Desktop' = voz do Windows, offline
@@ -109,9 +111,21 @@ const DEFAULT_CONFIG = {
     whisperModel: 'base', // tiny | base | small (maior = mais preciso e mais lento)
     language: 'pt',
     wakeWord: false, // escuta contínua: diga "Ohara, ..." (precisa do Whisper)
-    showListeningIndicator: true, // indicador flutuante, inclusive com a janela escondida
-    autoSendVoice: true, // na janela rápida, envia assim que transcreve
+    showListeningIndicator: false, // indicador flutuante, inclusive com a janela escondida
+    autoSendVoice: false, // na janela rápida, envia assim que transcreve
   },
 };
 
-module.exports = { DEFAULT_CONFIG };
+// Recursos desativados nesta edição, inclusive para configurações antigas.
+function simplifyConfig(config) {
+  config.voice.commandsEnabled = false;
+  config.voice.wakeWord = false;
+  config.voice.showListeningIndicator = false;
+  config.voice.autoSendVoice = false;
+  config.hotkeys.voice = '';
+  config.integrations.whatsapp.enabled = false;
+  config.integrations.whatsapp.notifyMeetingTasks = false;
+  return config;
+}
+
+module.exports = { DEFAULT_CONFIG, simplifyConfig };

@@ -6,10 +6,14 @@ const path = require('path');
 let ttsProc = null;
 
 function powershell(script) {
-  return spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], {
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], {
     windowsHide: true,
     stdio: ['pipe', 'ignore', 'ignore'],
-  }).on('error', () => {}).stdin.end(script);
+  });
+  child.on('error', () => {});
+  child.stdin.on('error', () => {}); // EPIPE se o PowerShell sair antes de ler o script
+  child.stdin.end(script);
+  return child;
 }
 
 // Lê um texto em voz alta com a voz pt-BR do Windows (offline).
@@ -28,6 +32,7 @@ $t = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))
 $s.Speak($t)`;
   ttsProc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
   ttsProc.on('error', () => {});
+  ttsProc.stdin.on('error', () => {});
   ttsProc.stdin.end(script);
 }
 

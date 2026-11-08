@@ -97,17 +97,14 @@ class MeetingsService {
   start() {
     this.stop();
     const dir = this.cfg.folder;
-    if (!this.cfg.enabled || !dir || !fs.existsSync(dir)) return;
-    try {
-      this.watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
-        if (name && name.toLowerCase().endsWith('.md')) this.#debounceScan();
-      });
-      this.watcher.on('error', () => {});
-    } catch {
-      /* sem watch: o scan periódico cobre */
-    }
-    // Rede de segurança: o watch do Windows às vezes perde eventos.
-    this.scanTimer = setInterval(() => this.scan(), 2 * 60 * 1000);
+    if (!this.cfg.enabled || !dir) return;
+    this.#watch();
+    // Rede de segurança: o watch do Windows às vezes perde eventos. Também liga o watch
+    // quando a pasta aparece depois (ex.: criada pela extensão após a Ohara abrir).
+    this.scanTimer = setInterval(() => {
+      if (!this.watcher) this.#watch();
+      this.scan();
+    }, 2 * 60 * 1000);
     this.backfillWaiting();
     // Retoma o que ficou pela metade (app fechado no meio, ou adiado pela cota).
     for (const m of Object.values(this.store.data.meetings)) {
@@ -118,6 +115,23 @@ class MeetingsService {
       }
     }
     this.scan();
+  }
+
+  #watch() {
+    const dir = this.cfg.folder;
+    if (!dir || !fs.existsSync(dir)) return;
+    try {
+      this.watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
+        if (name && name.toLowerCase().endsWith('.md')) this.#debounceScan();
+      });
+      // Pasta apagada ou desconectada: larga o watch; o scan periódico tenta de novo.
+      this.watcher.on('error', () => {
+        try { this.watcher?.close(); } catch {}
+        this.watcher = null;
+      });
+    } catch {
+      this.watcher = null; /* sem watch: o scan periódico cobre */
+    }
   }
 
   stop() {
@@ -153,13 +167,27 @@ class MeetingsService {
   }
 
   // Descobre reuniões novas ou que ganharam partes novas.
+  // Roda em timers e no watch: um erro aqui não pode escapar (derrubaria o processo principal).
   scan() {
+    try {
+      this.#scan();
+    } catch (err) {
+      console.error('Falha ao procurar reuniões:', err);
+    }
+  }
+
+  #scan() {
     if (!this.cfg.enabled) return;
     const groups = {};
     for (const f of this.#listFiles()) {
       const info = meetingKeyFromFile(f);
       if (!info) continue;
-      const st = fs.statSync(f);
+      let st;
+      try {
+        st = fs.statSync(f);
+      } catch {
+        continue; // apagado/renomeado entre a listagem e a leitura
+      }
       (groups[info.key] ||= { ...info, files: [] }).files.push({ path: f, mtime: st.mtimeMs, size: st.size });
     }
 
@@ -246,7 +274,9 @@ class MeetingsService {
     const config = this.getConfig();
     const m = this.store.data.meetings[key];
     const selfName = this.cfg.selfName;
-    const data = loadMeeting(m.files, { selfName });
+    const files = (m.files || []).filter((f) => fs.existsSync(f));
+    if (!files.length) throw new Error('Os arquivos da transcrição não estão mais na pasta.');
+    const data = loadMeeting(files, { selfName });
     Object.assign(m, {
       start: data.start,
       end: data.end,
@@ -340,7 +370,7 @@ class MeetingsService {
         meetingKey: m.key,
         person: o.responsavel,
         text: o.descricao,
-        deadline: /^d{4}-d{2}-d{2}$/.test(o.prazo || '') ? o.prazo : null,
+        deadline: /^\d{4}-\d{2}-\d{2}$/.test(o.prazo || '') ? o.prazo : null,
         forMe: typeof o.para_mim === 'boolean' ? o.para_mim : undefined,
         status: 'open',
         touched: false,
