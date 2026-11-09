@@ -85,3 +85,21 @@ test('pedido vago e mais longo vai para o Sonnet, não para o Haiku', () => {
   const d = r('queria que você desse uma olhada geral nas coisas que eu deixei pendentes por aqui hoje cedo');
   assert.equal(d.model, 'sonnet');
 });
+
+test('pedido que precisa do Chrome logado vai para o Claude, mesmo citando um projeto', () => {
+  const p = 'faca um post no linkedin tambem igual aos que fiz falando sobre a Ohara';
+  assert.equal(r(p, { projects }).provider, 'codex', 'sem a marcação de navegador, o projeto puxa para código');
+  const d = r(p, { projects, browser: true });
+  assert.equal(d.provider, 'claude');
+  assert.equal(d.model, 'sonnet');
+  assert.ok(d.reasons.some((x) => /Chrome logado/.test(x)));
+
+  // Cota do Claude alta, mas não bloqueada: o navegador ainda manda para o Claude.
+  assert.equal(r(p, { projects, browser: true, usage: { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0.1 } } }).provider, 'claude');
+  // Claude bloqueado: fica no Codex e explica.
+  const blocked = r(p, { projects, browser: true, usage: { claude: { status: 'rejected' }, codex: { fiveHour: 0.1 } } });
+  assert.equal(blocked.provider, 'codex');
+  assert.ok(blocked.reasons.some((x) => /sem navegador/.test(x)));
+  // Escolha manual continua valendo.
+  assert.equal(r(p, { projects, browser: true, override: 'codex:medium' }).provider, 'codex');
+});

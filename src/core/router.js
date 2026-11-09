@@ -223,6 +223,19 @@ function route(prompt, opts = {}) {
     }
   }
 
+  // Precisa do Chrome logado (LinkedIn, vagas...): só o Claude tem a extensão Claude in Chrome.
+  // Vale mesmo com a cota apertada; só fica no Codex se o Claude estiver bloqueado.
+  if (opts.browser && provider === 'codex') {
+    if (!claudeBlocked) {
+      provider = 'claude';
+      if (!models[tier] || tier === 'rapido') tier = 'equilibrado';
+      if (effort !== 'high') effort = 'medium';
+      reasons.push('precisa do Chrome logado: enviado ao Claude, que tem a extensão do navegador');
+    } else {
+      reasons.push('precisa do Chrome, mas a cota do Claude acabou: o Codex faz o que der sem navegador');
+    }
+  }
+
   if (provider === 'codex') {
     return { provider, model: config.codex.model || 'padrão', effort, category, label: cat.label, reasons, project };
   }

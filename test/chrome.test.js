@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
-const { findChrome, wantsBrowser, ensureChrome, chromeNote } = require('../src/integrations/chrome');
+const { findChrome, wantsBrowser, needsBrowser, checkBridge, ensureChrome: realEnsure, chromeNote, chromeIssueNote, CODEX_BROWSER_NOTE } = require('../src/integrations/chrome');
+
+// Ponte da extensão instalada, a não ser que o teste diga o contrário.
+const ensureChrome = (o) => realEnsure({ bridge: async () => ({ ok: true }), ...o });
 
 test('acha o chrome.exe em Arquivos de Programas ou na pasta do usuário', () => {
   const env = { ProgramFiles: 'C:\\PF', 'ProgramFiles(x86)': 'C:\\PF86', LOCALAPPDATA: 'C:\\U\\Local' };
@@ -59,4 +62,54 @@ test('o prompt ensina a reabrir o Chrome e tentar de novo antes de pedir ajuda',
   assert.match(note, /tente de novo/);
   assert.match(note, /list_connected_browsers/);
   assert.match(chromeNote(null), /Start-Process chrome/);
+});
+
+test('pedidos que só dão certo no Chrome logado (vão sempre para o Claude)', () => {
+  for (const t of ['faca um post no linkedin tambem igual aos que fiz falando sobre a Ohara', 'roda /vagas', 'me candidata nessa vaga', 'abre no navegador']) {
+    assert.ok(needsBrowser(t), t);
+  }
+  for (const t of ['corrige o bug na página de perfil do site', 'faz o login da API funcionar', 'resume a reunião']) {
+    assert.ok(!needsBrowser(t), t);
+  }
+});
+
+test('confere a ponte da extensão: chave do host nativo, manifesto e executável', async () => {
+  const manifest = 'C:\\Host\\host.json';
+  const host = 'C:\\Host\\chrome-native-host.bat';
+  const files = { [manifest]: JSON.stringify({ path: host }) };
+  const exists = (p) => p in files || p === host;
+  const readFile = (p) => files[p];
+  assert.deepEqual(await checkBridge({ readKey: async () => manifest, exists, readFile }), { ok: true });
+
+  const noKey = await checkBridge({ readKey: async () => null, exists, readFile });
+  assert.equal(noKey.ok, false);
+  assert.match(noKey.error, /não está registrada/);
+
+  const badHost = await checkBridge({ readKey: async () => manifest, exists: (p) => p === manifest, readFile });
+  assert.equal(badHost.ok, false);
+  assert.match(badHost.error, /não existe/);
+
+  const badJson = await checkBridge({ readKey: async () => manifest, exists, readFile: () => '{' });
+  assert.equal(badJson.ok, false);
+});
+
+test('ponte ausente: ainda abre o Chrome, mas avisa o motivo antes de começar', async () => {
+  let launched = 0;
+  const r = await realEnsure({
+    bridge: async () => ({ ok: false, error: 'a extensão Claude in Chrome não está registrada' }),
+    chromePath: 'chrome.exe', isRunning: async () => true, launch: () => launched++, wait: async () => {},
+  });
+  assert.equal(r.running, true);
+  assert.equal(r.bridge, false);
+  assert.match(r.error, /não está registrada/);
+
+  const ok = await ensureChrome({ chromePath: 'chrome.exe', isRunning: async () => true, launch() {}, wait: async () => {} });
+  assert.equal(ok.bridge, true);
+});
+
+test('o prompt manda conferir a conexão antes de começar; o Codex não tenta usar o navegador', () => {
+  assert.match(chromeNote('chrome.exe'), /confira a conexão primeiro/);
+  assert.match(chromeIssueNote('falta o host'), /falta o host/);
+  assert.match(chromeIssueNote('x'), /\/chrome/);
+  assert.match(CODEX_BROWSER_NOTE, /Não tente abrir nem automatizar o navegador/);
 });

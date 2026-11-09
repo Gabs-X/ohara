@@ -439,3 +439,41 @@ test('falha ao abrir o Chrome não impede a resposta e aparece nas ferramentas',
   assert.ok(msg.tools.some((t) => /não consegui abrir \(acesso negado\)/.test(t)));
   assert.ok(msg.text);
 });
+
+test('pedido de LinkedIn que pareceria código vai para o Claude, que tem o navegador', async () => {
+  const { o } = setup({ ensureChrome: async () => ({ running: true, started: false, bridge: true }) });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'implementa o post no linkedin sobre o commit do repositorio', runId: 'li' });
+  await tick();
+  assert.equal(calls[0].provider, 'claude');
+  assert.match(calls[0].opts.systemPrompt, /confira a conexão primeiro/);
+  calls[0].finish();
+  const msg = await pending;
+  assert.ok(msg.route.reasons.some((r) => /Chrome logado/.test(r)));
+});
+
+test('ponte da extensão ausente: avisa antes de começar e a IA já sabe o motivo', async () => {
+  const { o } = setup({ ensureChrome: async () => ({ running: true, started: false, bridge: false, error: 'a extensão Claude in Chrome não está registrada no Windows' }) });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'confere meu perfil do LinkedIn', runId: 'ponte' });
+  await tick();
+  assert.match(calls[0].opts.systemPrompt, /Verificação do navegador antes de começar: a extensão Claude in Chrome não está registrada/);
+  calls[0].finish();
+  const msg = await pending;
+  assert.ok(msg.tools.some((t) => /Chrome: a extensão Claude in Chrome não está registrada/.test(t)));
+});
+
+test('Claude bloqueado: o Codex recebe o pedido de navegador sem tentar abrir o Chrome', async () => {
+  let opened = 0;
+  const usage = { updateClaudeLimits() {}, summary: () => ({}), record() {}, refreshCodexLimits() {}, limits: () => ({ claude: { status: 'rejected' }, codex: { fiveHour: 0.1 } }), current: () => ({}) };
+  const { o } = setup({ usage, ensureChrome: async () => { opened++; return { running: true, bridge: true }; } });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'faz um post no linkedin', runId: 'codex-nav' });
+  await tick();
+  assert.equal(calls[0].provider, 'codex');
+  assert.equal(opened, 0);
+  assert.match(calls[0].opts.systemPrompt, /você \(Codex\) não tem a extensão/);
+  assert.doesNotMatch(calls[0].opts.systemPrompt, /mcp__claude-in-chrome/);
+  calls[0].finish();
+  await pending;
+});

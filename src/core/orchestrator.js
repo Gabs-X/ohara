@@ -9,7 +9,7 @@ const path = require('path');
 const { listRepos } = require('./system');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
-const { wantsBrowser, chromeNote, findChrome } = require('../integrations/chrome');
+const { wantsBrowser, needsBrowser, chromeNote, chromeIssueNote, findChrome, CODEX_BROWSER_NOTE } = require('../integrations/chrome');
 
 const WHATSAPP_NOTE = [
   'O pedido envolve WhatsApp. Não tente enviar nada você mesmo: a Ohara cuida do envio.',
@@ -208,11 +208,13 @@ class Orchestrator {
   }
 
   #route(chat, text, { hasImage, override }) {
+    const config = this.getConfig();
     return route(text, {
+      browser: config.claude?.chrome !== false && needsBrowser(text),
       hasImage,
       override,
       usage: this.usage.limits(),
-      config: this.getConfig(),
+      config,
       learned: this.learned(),
       projects: this.#projects(),
       previous: this.#previousCategory(chat),
@@ -344,6 +346,16 @@ class Orchestrator {
     const confirmContacts = !!config.integrations.whatsapp?.confirmContacts;
     // Claude in Chrome: só no Claude (claude -p --chrome) e se não foi desligado em Ajustes.
     const useChrome = decision.provider === 'claude' && config.claude?.chrome !== false;
+    // Antes de começar uma tarefa de navegador, confere se dá para usar o Chrome:
+    // ponte da extensão instalada e Chrome aberto (abre se estiver fechado).
+    let chromeIssue = null;
+    if (useChrome && this.ensureChrome && wantsBrowser(text)) {
+      const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
+      if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
+      if (!chrome?.running) chromeIssue = `não consegui abrir (${chrome?.error || 'erro desconhecido'})`;
+      else if (chrome.bridge === false) chromeIssue = chrome.error || 'a extensão Claude in Chrome não está registrada';
+      if (chromeIssue) onEvent({ kind: 'tool', text: `Chrome: ${chromeIssue}` });
+    }
     const extra = [
       source === 'voice' ? VOICE_NOTE : '',
       parallel ? PARALLEL_NOTE : '',
@@ -351,6 +363,8 @@ class Orchestrator {
       this.whatsappWeb ? CONTACTS_NOTE(confirmContacts) : '',
       askWhatsApp ? WHATSAPP_NOTE : '',
       useChrome ? chromeNote(findChrome()) : '',
+      chromeIssue ? chromeIssueNote(chromeIssue) : '',
+      decision.provider === 'codex' && needsBrowser(text) ? CODEX_BROWSER_NOTE : '',
     ].filter(Boolean).join('\n');
     const common = {
       prompt: context + request,
@@ -366,12 +380,6 @@ class Orchestrator {
 
     let result;
     try {
-      // Pedido de navegador com o Chrome fechado: abre antes, senão a extensão não conecta.
-      if (useChrome && this.ensureChrome && wantsBrowser(text)) {
-        const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
-        if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
-        else if (!chrome?.running) onEvent({ kind: 'tool', text: `Chrome: não consegui abrir (${chrome?.error || 'erro desconhecido'})` });
-      }
       result =
         decision.provider === 'codex'
           ? await runCodex({ ...common, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
