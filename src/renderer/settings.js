@@ -94,6 +94,7 @@ async function renderSettings() {
       <label>Pasta para arquivos gerados<input id="g-out" value="${esc(cfg.outputDir)}"></label>
       <label>Raiz dos repositórios<input id="g-root" value="${esc(cfg.workspaceRoot)}"></label>
       <label>Pasta de login do Claude <span class="muted small">— vazio = ~/.claude-pessoal (sua conta pessoal); ~/.claude = conta da empresa</span><input id="g-claude-dir" value="${esc(cfg.claude?.configDir || '')}" placeholder="~/.claude-pessoal"></label>
+      <label class="check"><input type="checkbox" id="g-chrome" ${cfg.claude?.chrome !== false ? 'checked' : ''}> Usar o Chrome nas tarefas <span class="muted small">— extensão Claude in Chrome: navega logado, ex.: conferir vagas e se candidatar</span></label>
       <button class="btn small-btn" id="g-save">Salvar</button>
     </section>
   </div>`;
@@ -195,6 +196,6 @@ async function renderSettings() {
 
   // Geral
   $s('#g-login').addEventListener('change', (e) => central.loginItem(e.target.checked));
-  $s('#g-save').addEventListener('click', () => save({ outputDir: $s('#g-out').value.trim(), workspaceRoot: $s('#g-root').value.trim(), claude: { configDir: $s('#g-claude-dir').value.trim() } }));
+  $s('#g-save').addEventListener('click', () => save({ outputDir: $s('#g-out').value.trim(), workspaceRoot: $s('#g-root').value.trim(), claude: { configDir: $s('#g-claude-dir').value.trim(), chrome: $s('#g-chrome').checked } }));
 }
 

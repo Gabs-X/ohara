@@ -45,7 +45,7 @@ function describeTool(name, input = {}) {
  * @param {(ev:object)=>void} o.onEvent
  * @param {AbortSignal} [o.signal]
  */
-async function runClaude(o) {
+function buildClaudeArgs(o) {
   const { config } = o;
   const args = [
     '-p',
@@ -59,6 +59,15 @@ async function runClaude(o) {
   ];
   if (config.workspaceRoot) args.push('--add-dir', config.workspaceRoot);
   if (o.sessionId) args.push('--resume', o.sessionId);
+  // Claude in Chrome (mcp__claude-in-chrome__*): navega no Chrome logado do Gabriel.
+  // Fica ligado, a não ser que seja desligado explicitamente em Ajustes.
+  if (config.claude?.chrome !== false) args.push('--chrome');
+  return args;
+}
+
+async function runClaude(o) {
+  const { config } = o;
+  const args = buildClaudeArgs(o);
 
   let prompt = o.prompt;
   if (o.images?.length) {
@@ -155,4 +164,4 @@ async function runClaude(o) {
   };
 }
 
-module.exports = { runClaude, claudeEnv, claudeConfigDir, friendlyError };
+module.exports = { runClaude, buildClaudeArgs, claudeEnv, claudeConfigDir, friendlyError };

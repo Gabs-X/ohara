@@ -23,6 +23,8 @@ const DEFAULT_CONFIG = {
     // "auto" = o próprio Claude Code decide com classificador de segurança.
     // "bypassPermissions" = acesso total (ative no app só quando quiser).
     permissionMode: 'auto',
+    // Extensão Claude in Chrome nas sessões (ex.: /vagas conferir vagas e se candidatar no LinkedIn logado).
+    chrome: true,
     models: {
       rapido: 'haiku',
       equilibrado: 'sonnet',
