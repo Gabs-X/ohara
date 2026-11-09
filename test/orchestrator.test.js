@@ -390,3 +390,52 @@ test('falha ao registrar o uso não impede o fim da resposta', async () => {
   await pending;
   assert.ok(events.some(([ch]) => ch === 'chat:done'));
 });
+
+test('pedido de navegador abre o Chrome antes e o prompt ensina a reconectar a extensão', async () => {
+  const opened = [];
+  const { o } = setup({ ensureChrome: async () => { opened.push(1); return { running: true, started: true }; } });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'preenche o projeto no meu perfil do LinkedIn', runId: 'chrome' });
+  await tick();
+  assert.equal(opened.length, 1, 'abriu o Chrome antes de chamar a IA');
+  assert.equal(calls[0].provider, 'claude');
+  assert.match(calls[0].opts.systemPrompt, /Claude in Chrome/);
+  assert.match(calls[0].opts.systemPrompt, /tente de novo/);
+  calls[0].finish();
+  const msg = await pending;
+  assert.ok(msg.tools.some((t) => /Chrome: aberto/.test(t)));
+});
+
+test('pedido sem navegador não abre o Chrome; Chrome desligado em Ajustes também não', async () => {
+  let opened = 0;
+  const ensureChrome = async () => { opened++; return { running: true, started: false }; };
+  const { o } = setup({ ensureChrome });
+  const chat = o.create(WORK);
+  const p1 = o.send(chat.id, { text: 'qual a capital da França?', runId: 'sem-nav' });
+  await tick();
+  calls[0].finish();
+  await p1;
+  assert.equal(opened, 0);
+
+  const config = structuredClone(DEFAULT_CONFIG);
+  config.claude.chrome = false;
+  const off = setup({ ensureChrome, getConfig: () => config });
+  const chat2 = off.o.create(WORK);
+  const p2 = off.o.send(chat2.id, { text: 'abre o LinkedIn no Chrome e edita meu perfil', runId: 'chrome-off' });
+  await tick();
+  assert.equal(opened, 0);
+  assert.doesNotMatch(calls[0].opts.systemPrompt, /Claude in Chrome/);
+  calls[0].finish();
+  await p2;
+});
+
+test('falha ao abrir o Chrome não impede a resposta e aparece nas ferramentas', async () => {
+  const { o } = setup({ ensureChrome: async () => { throw new Error('acesso negado'); } });
+  const chat = o.create(WORK);
+  const pending = o.send(chat.id, { text: 'confere a vaga no LinkedIn', runId: 'chrome-erro' });
+  await tick();
+  calls[0].finish();
+  const msg = await pending;
+  assert.ok(msg.tools.some((t) => /não consegui abrir \(acesso negado\)/.test(t)));
+  assert.ok(msg.text);
+});

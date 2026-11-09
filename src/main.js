@@ -20,6 +20,7 @@ const { Calendar } = require('./integrations/calendar');
 const { GitHub } = require('./integrations/github');
 const { Slack } = require('./integrations/slack');
 const { Whisper } = require('./integrations/whisper');
+const { ensureChrome } = require('./integrations/chrome');
 const system = require('./core/system');
 const { trashOldInstallers, uninstallLegacyApp } = require('./core/cleanup');
 const { NeuralTTS, NEURAL_VOICES, isNeural, cleanForSpeech, splitForSpeech, takeSpeakable } = require('./integrations/tts');
@@ -441,7 +442,7 @@ function notify(title, body, view = null, chatId = null) {
 }
 
 const disabledFeature = () => { throw new Error("Recurso desativado nesta versão da Ohara."); };
-const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url) });
+const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url), ensureChrome: () => ensureChrome() });
 const meetings = new MeetingsService({
   store: meetingsStore, usage, getConfig, emit: send, notify: (t, b) => notify(t, b, 'meetings'),
 });

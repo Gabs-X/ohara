@@ -9,6 +9,7 @@ const path = require('path');
 const { listRepos } = require('./system');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
+const { wantsBrowser, chromeNote, findChrome } = require('../integrations/chrome');
 
 const WHATSAPP_NOTE = [
   'O pedido envolve WhatsApp. Não tente enviar nada você mesmo: a Ohara cuida do envio.',
@@ -98,8 +99,9 @@ function clip(text, max) {
 }
 
 class Orchestrator {
-  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null }) {
+  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null, ensureChrome = null }) {
     this.openExternal = openExternal; // abre URLs/URIs (shell.openExternal); habilita as ações locais
+    this.ensureChrome = ensureChrome; // abre o Chrome antes de pedidos de navegador, para a extensão Claude conectar
 
     this.whatsapp = getConfig().integrations.whatsapp?.enabled === false ? null : whatsapp; // CallMeBot: mensagens para o próprio Gabriel (opcional)
     this.whatsappWeb = getConfig().integrations.whatsapp?.enabled === false ? null : whatsappWeb; // WhatsApp Web: mensagens para contatos, sempre com confirmação (opcional)
@@ -340,12 +342,15 @@ class Orchestrator {
     };
 
     const confirmContacts = !!config.integrations.whatsapp?.confirmContacts;
+    // Claude in Chrome: só no Claude (claude -p --chrome) e se não foi desligado em Ajustes.
+    const useChrome = decision.provider === 'claude' && config.claude?.chrome !== false;
     const extra = [
       source === 'voice' ? VOICE_NOTE : '',
       parallel ? PARALLEL_NOTE : '',
       config.integrations.whatsapp?.enabled === false ? 'O envio de WhatsApp e os comandos de voz foram desativados a pedido do Gabriel. Não envie mensagens, não use o navegador para contornar isso e não gere blocos [[whatsapp]]. Você pode redigir textos para ele copiar.' : '',
       this.whatsappWeb ? CONTACTS_NOTE(confirmContacts) : '',
       askWhatsApp ? WHATSAPP_NOTE : '',
+      useChrome ? chromeNote(findChrome()) : '',
     ].filter(Boolean).join('\n');
     const common = {
       prompt: context + request,
@@ -361,6 +366,12 @@ class Orchestrator {
 
     let result;
     try {
+      // Pedido de navegador com o Chrome fechado: abre antes, senão a extensão não conecta.
+      if (useChrome && this.ensureChrome && wantsBrowser(text)) {
+        const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
+        if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
+        else if (!chrome?.running) onEvent({ kind: 'tool', text: `Chrome: não consegui abrir (${chrome?.error || 'erro desconhecido'})` });
+      }
       result =
         decision.provider === 'codex'
           ? await runCodex({ ...common, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
