@@ -3,7 +3,7 @@
 
 const FEATURE_LABEL = {
   chat: 'Conversas', routine: 'Rotinas', quick: 'Janela rápida', meetings: 'Reuniões', busca: 'Busca nas reuniões',
-  briefing: 'Briefings', cobranca: 'Cobranças', slack: 'Slack',
+  briefing: 'Briefings', cobranca: 'Cobranças', slack: 'Slack', correcao: 'Correção de texto',
 };
 const SERIES = [
   { key: 'claude', label: 'Claude', color: 'var(--claude)', cls: 'sw-claude' },

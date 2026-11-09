@@ -67,11 +67,13 @@ async function renderSettings() {
 
     <section class="section">
       <h2>⌨️ Atalhos globais</h2>
-      <p class="muted small">Formato do Electron: <code>CommandOrControl+Alt+V</code>, <code>Alt+Space</code>…</p>
+      <p class="muted small">Formato do Electron: <code>CommandOrControl+Alt+V</code>, <code>Alt+Space</code>… Deixe vazio para desligar um atalho.</p>
+      <p class="muted small">Corrigir texto: selecione o que escreveu em qualquer app e aperte o atalho. A Ohara copia, corrige ortografia, acentos e pontuação mantendo o seu jeito e cola no lugar. O texto selecionado vai para a IA (Claude ou Codex).</p>
       <table class="table compact"><tbody>${[
         ['toggle', 'Mostrar/esconder a Ohara'],
         ['quick', 'Janela rápida'],
         ['clipboard', 'Janela rápida com o que você copiou'],
+        ['fixText', 'Corrigir o texto selecionado (em qualquer app)'],
       ].map(([k, l]) => `<tr><td>${l}</td><td><input data-hk="${k}" value="${esc(cfg.hotkeys[k] || '')}"></td><td>${hk[k] ? ok(hk[k] === 'ok', hk[k]) : ''}</td></tr>`).join('')}</tbody></table>
       <button class="btn small-btn" id="hk-save">Salvar atalhos</button>
     </section>

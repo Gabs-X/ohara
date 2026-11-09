@@ -57,6 +57,71 @@ public static class K { [DllImport("user32.dll")] public static extern void keyb
 [K]::keybd_event(0x5B,0,2,[UIntPtr]::Zero)`);
 }
 
+// Envia Ctrl+<tecla> para a janela em foco, depois que você soltar Ctrl/Alt/Shift/Win do atalho
+// (senão o app receberia Ctrl+Alt+C e o atalho dispararia de novo).
+// Compila o acesso ao teclado uma vez numa DLL em %TEMP% (compilar a cada uso custa ~2 s).
+const KEYS_SCRIPT = `
+$src = @'
+using System; using System.Runtime.InteropServices;
+public static class OharaKeys {
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+  [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int k);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+'@
+$dll = Join-Path $env:TEMP 'OharaKeys-1.dll'
+try {
+  if (-not (Test-Path $dll)) { Add-Type -TypeDefinition $src -OutputAssembly $dll }
+  Add-Type -Path $dll
+} catch { Add-Type -TypeDefinition $src }
+$until = (Get-Date).AddSeconds(2)
+while ((Get-Date) -lt $until -and (@(0x10,0x11,0x12,0x5B,0x5C) | Where-Object { [OharaKeys]::GetAsyncKeyState($_) -band 0x8000 })) { Start-Sleep -Milliseconds 20 }
+function Send-Ctrl([byte]$k) {
+  [OharaKeys]::keybd_event(0x11,0,0,[UIntPtr]::Zero); [OharaKeys]::keybd_event($k,0,0,[UIntPtr]::Zero)
+  [OharaKeys]::keybd_event($k,0,2,[UIntPtr]::Zero); [OharaKeys]::keybd_event(0x11,0,2,[UIntPtr]::Zero)
+}
+$fg = [string][OharaKeys]::GetForegroundWindow().ToInt64()
+`;
+
+function powershellOutput(script, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], {
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    const timer = setTimeout(() => { child.kill(); reject(new Error('o Windows demorou demais para copiar/colar')); }, timeoutMs);
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    child.on('error', (e) => { clearTimeout(timer); reject(e); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(err.trim().split('\n')[0] || `PowerShell saiu com código ${code}`));
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(script);
+  });
+}
+
+// Copia a seleção da janela em foco; devolve o identificador dessa janela.
+function copySelection() {
+  return powershellOutput(`${KEYS_SCRIPT}
+Send-Ctrl 0x43
+[Console]::Out.Write($fg)`);
+}
+
+// Cola na janela só se ela ainda estiver em foco. Devolve false se você trocou de janela.
+async function pasteInto(target) {
+  const id = String(target || '').replace(/\D/g, '');
+  const out = await powershellOutput(`${KEYS_SCRIPT}
+if ('${id}' -and $fg -ne '${id}') { [Console]::Out.Write('moved'); exit 0 }
+Send-Ctrl 0x56
+[Console]::Out.Write('ok')`);
+  return out === 'ok';
+}
+
 // Lista as pastas de projeto (com .git) até dois níveis abaixo da raiz.
 function listRepos(root) {
   const out = [];
@@ -80,4 +145,4 @@ function listRepos(root) {
   return out.sort((a, b) => a.localeCompare(b));
 }
 
-module.exports = { speak, stopSpeaking, startVoiceTyping, listRepos };
+module.exports = { speak, stopSpeaking, startVoiceTyping, listRepos, copySelection, pasteInto };

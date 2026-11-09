@@ -14,6 +14,7 @@ const DEFAULT_CONFIG = {
     toggle: 'CommandOrControl+Space', // mostra/esconde a janela principal
     quick: 'Alt+Space', // janela rápida
     clipboard: 'CommandOrControl+Alt+Space', // janela rápida com o conteúdo copiado
+    fixText: 'CommandOrControl+Alt+C', // corrige o texto selecionado em qualquer app e cola no lugar
     voice: '', // fala → texto (Whisper)
   },
 
@@ -62,6 +63,7 @@ const DEFAULT_CONFIG = {
     busca: { background: false, model: 'equilibrado', effort: 'medium', provider: 'auto' },
     cobranca: { background: false, model: 'rapido', effort: 'low', provider: 'auto' },
     slack: { background: true, model: 'rapido', effort: 'low', provider: 'auto' },
+    correcao: { background: false, model: 'rapido', effort: 'low', provider: 'auto' },
   },
 
   // Roteador que aprende com as suas trocas manuais de modelo.

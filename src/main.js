@@ -24,6 +24,8 @@ const system = require('./core/system');
 const { trashOldInstallers, uninstallLegacyApp } = require('./core/cleanup');
 const { NeuralTTS, NEURAL_VOICES, isNeural, cleanForSpeech, splitForSpeech, takeSpeakable } = require('./integrations/tts');
 const { matchWake, isEndPhrase, isMicOff } = require('./core/wake');
+const textFix = require('./core/text-fix');
+const { askOnce } = require('./core/ai');
 
 // Desenvolvimento: CENTRAL_DATA_DIR usa outra pasta de dados (e permite rodar ao lado do app instalado).
 if (process.env.CENTRAL_DATA_DIR) app.setPath('userData', process.env.CENTRAL_DATA_DIR);
@@ -723,7 +725,45 @@ function registerHotkeys() {
   bind('toggle', h.toggle, toggleWindow);
   bind('quick', h.quick, () => (quick?.isVisible() ? quick.hide() : showQuick({ mode: 'ask' })));
   bind('clipboard', h.clipboard, () => showQuick({ mode: 'clipboard', text: clipboard.readText() }));
+  bind('fixText', h.fixText, guarded('correção de texto', fixSelectedText));
+}
 
+// ---------- Correção do texto selecionado (qualquer app) ----------
+// Guarda tudo o que estava copiado (texto, HTML, RTF, imagem) para devolver depois.
+const clipboardAccess = {
+  snapshot: () => ({ text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), image: clipboard.readImage() }),
+  restore: (s) => {
+    const data = {};
+    if (s.text) data.text = s.text;
+    if (s.html) data.html = s.html;
+    if (s.rtf) data.rtf = s.rtf;
+    if (s.image && !s.image.isEmpty()) data.image = s.image;
+    if (Object.keys(data).length) clipboard.write(data);
+    else clipboard.clear();
+  },
+  readText: () => clipboard.readText(),
+  writeText: (t) => clipboard.writeText(t),
+  clear: () => clipboard.clear(),
+};
+let fixingText = false;
+
+async function fixSelectedText() {
+  if (fixingText) return; // atalho apertado de novo enquanto corrige
+  fixingText = true;
+  tray?.setToolTip('Ohara · corrigindo texto…');
+  try {
+    const r = await textFix.fixSelection({
+      clipboard: clipboardAccess,
+      keys: { copy: system.copySelection, paste: system.pasteInto },
+      correct: async (text) => (await askOnce({ feature: 'correcao', prompt: textFix.buildFixPrompt(text), schema: textFix.FIX_SCHEMA, config, usage })).data,
+    });
+    const msg = textFix.fixMessage(r);
+    if (msg && Notification.isSupported()) new Notification({ title: 'Correção de texto', body: msg, icon: ICON, silent: r.status === 'unchanged' }).show();
+    if (r.status === 'error') errorLog('correção de texto', r.error);
+  } finally {
+    fixingText = false;
+    tray?.setToolTip('Ohara');
+  }
 }
 
 async function captureScreen() {
