@@ -34,6 +34,8 @@ const DEFAULT_CONFIG = {
   },
 
   codex: {
+    // Desligado: a Ohara não usa o Codex em nada (chat, funções automáticas, cota). Liga em Ajustes.
+    enabled: false,
     // Vazio = usa o modelo padrão configurado no ~/.codex/config.toml.
     model: '',
     sandbox: 'workspace-write',

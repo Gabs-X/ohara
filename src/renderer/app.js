@@ -435,6 +435,15 @@ function fmtReset(sec) {
   return d.toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+// Codex desligado nos Ajustes: some do menu de modelos e dos medidores de cota.
+function applyCodex() {
+  const on = state.config?.codex?.enabled === true;
+  for (const o of el.model.querySelectorAll('option[value^="codex"]')) { o.hidden = !on; o.disabled = !on; }
+  if (!on && el.model.value.startsWith('codex')) el.model.value = 'auto';
+  for (const m of document.querySelectorAll('.meter[data-key^="codex"]')) m.hidden = !on;
+}
+central.onConfigChanged((cfg) => { state.config = cfg; applyCodex(); });
+
 function renderUsage(u) {
   const c = u.limits.claude || {};
   const x = u.limits.codex || {};
@@ -444,7 +453,8 @@ function renderUsage(u) {
   setMeter('codex-7d', x.weekly, x.weeklyResetsAt);
   const t = u.today;
   const tot = (p) => fmtNum(p.input + p.cached + p.output);
-  $('#usage-today').innerHTML = `Hoje: Claude ${t.claude.calls} pedidos (${tot(t.claude)} tokens)<br>Codex ${t.codex.calls} pedidos (${tot(t.codex)} tokens)`;
+  const codex = state.config?.codex?.enabled === true ? `<br>Codex ${t.codex.calls} pedidos (${tot(t.codex)} tokens)` : '';
+  $('#usage-today').innerHTML = `Hoje: Claude ${t.claude.calls} pedidos (${tot(t.claude)} tokens)${codex}`;
 }
 
 central.onMessage(({ chatId, message }) => {
@@ -548,6 +558,7 @@ async function newChatWithPrompt(text, { cwd, send = false, override } = {}) {
   state.config = await central.getConfig();
   central.appVersion().then((v) => { document.getElementById('app-version').textContent = 'v' + v; });
   el.speak.checked = !!state.config.voice.speakReplies;
+  applyCodex();
   await loadRepos();
   syncCwdSelect();
   await refreshList();

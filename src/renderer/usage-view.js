@@ -235,11 +235,12 @@ async function renderUsageView() {
   }
   const featRows = Object.values(feat).sort((a, b) => b.claude + b.codex - (a.claude + a.codex));
 
+  const codexOn = cfg.codex?.enabled === true;
   const pct = (v) => Math.round(v * 100);
   const slider = (path, label, value, help) => `<label class="slider"><span>${label} <b data-out="${path}">${pct(value)}%</b></span><input type="range" min="30" max="100" step="5" value="${pct(value)}" data-path="${path}"><small class="muted">${help}</small></label>`;
   const featModel = (k, f) => `<tr><td>${esc(FEATURE_LABEL[k] || k)}${f.background ? ' <span class="tag">segundo plano</span>' : ''}</td>
     <td><select data-feature="${k}" data-field="model">${[['rapido', 'Haiku'], ['equilibrado', 'Sonnet'], ['profundo', 'Opus']].map(([v, l]) => `<option value="${v}" ${f.model === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
-    <td><select data-feature="${k}" data-field="provider">${[['auto', 'Auto (pela cota)'], ['claude', 'Sempre Claude'], ['codex', 'Sempre Codex']].map(([v, l]) => `<option value="${v}" ${f.provider === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td></tr>`;
+    <td><select data-feature="${k}" data-field="provider">${[['auto', 'Auto (pela cota)'], ['claude', 'Sempre Claude'], ...(codexOn ? [['codex', 'Sempre Codex']] : [])].map(([v, l]) => `<option value="${v}" ${f.provider === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td></tr>`;
 
   body.innerHTML = `
     <div class="tiles">
@@ -269,10 +270,10 @@ async function renderUsageView() {
       <section class="section">
         <h2>Orçamento de cota</h2>
         <p class="muted small">Funções automáticas param de usar uma IA quando ela passa do limite, trocam para a outra e, se as duas estiverem altas, esperam a janela renovar. Assim sobra cota para você no chat.</p>
-        ${slider('budgets.backgroundClaude', 'Automáticas usam o Claude até', cfg.budgets.backgroundClaude, 'depois disso vão para o Codex')}
-        ${slider('budgets.backgroundCodex', 'Automáticas usam o Codex até', cfg.budgets.backgroundCodex, 'depois disso esperam a janela renovar')}
+        ${slider('budgets.backgroundClaude', 'Automáticas usam o Claude até', cfg.budgets.backgroundClaude, codexOn ? 'depois disso vão para o Codex' : 'depois disso esperam a janela renovar')}
+        ${codexOn ? slider('budgets.backgroundCodex', 'Automáticas usam o Codex até', cfg.budgets.backgroundCodex, 'depois disso esperam a janela renovar') : ''}
         ${slider('quota.claudeDowngradeAt', 'No chat, Opus vira Sonnet a partir de', cfg.quota.claudeDowngradeAt, 'economiza a cota semanal')}
-        ${slider('quota.claudeAvoidAt', 'No chat, vai para o Codex a partir de', cfg.quota.claudeAvoidAt, 'quando possível')}
+        ${codexOn ? slider('quota.claudeAvoidAt', 'No chat, vai para o Codex a partir de', cfg.quota.claudeAvoidAt, 'quando possível') : ''}
       </section>
       <section class="section">
         <h2>Modelo de cada função</h2>

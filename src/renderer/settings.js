@@ -16,6 +16,11 @@ async function renderSettings() {
   body.innerHTML = `
   <div class="settings">
     <section class="section">
+      <h2>Codex</h2>
+      <label class="check"><input id="codex-on" type="checkbox" ${cfg.codex?.enabled === true ? 'checked' : ''}> Usar o Codex (conta logada no "codex" deste PC)</label>
+      <p class="muted small">Desligado, tudo vai para o Claude: chat, funções automáticas e a reserva quando a cota do Claude aperta. A Ohara também para de ler as sessões em ~/.codex.</p>
+    </section>
+    <section class="section">
       <h2>Desenvolvimento e publicação</h2>
       <p class="muted small">Permissões do Codex ao trabalhar no código da Ohara. Valem nas próximas execuções; outras pastas mantêm sua configuração habitual.</p>
       <label>Acesso ao desenvolver a Ohara<select id="dev-permissions">
@@ -111,6 +116,7 @@ async function renderSettings() {
       throw err;
     }
   };
+  $s('#codex-on').addEventListener('change', (e) => callSafe(save({ codex: { enabled: e.target.checked } }, e.target.checked ? 'Codex ligado.' : 'Codex desligado: tudo vai para o Claude.')));
   $s('#dev-save').addEventListener('click', () => callSafe((async () => {
     await save({ codex: { developmentPermissions: $s('#dev-permissions').value, developmentPreflight: $s('#dev-preflight').checked } }, 'Permissões salvas para as próximas execuções.');
   })()));

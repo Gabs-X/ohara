@@ -3,7 +3,10 @@ const assert = require('node:assert');
 const { parseICS, expand, meetCode } = require('../src/integrations/calendar');
 const { learnPreferences, route } = require('../src/core/router');
 const { pickProvider } = require('../src/core/ai');
-const { DEFAULT_CONFIG: config } = require('../src/core/config');
+const { DEFAULT_CONFIG } = require('../src/core/config');
+
+const config = structuredClone(DEFAULT_CONFIG);
+config.codex.enabled = true;
 
 const ICS = `BEGIN:VCALENDAR
 BEGIN:VEVENT
@@ -65,4 +68,13 @@ test('orçamento: com as duas cotas altas, segundo plano é adiado', () => {
   const r = pickProvider('meetings', limits, config);
   assert.ok(r.defer);
   assert.ok(r.defer >= reset * 1000);
+});
+
+test('Codex desligado (o padrão): as funções automáticas não usam ele nem como reserva', () => {
+  const off = structuredClone(DEFAULT_CONFIG);
+  off.features.meetings.provider = 'codex';
+  assert.equal(pickProvider('meetings', { claude: { fiveHour: 0.1 } }, off).provider, 'claude');
+  const r = pickProvider('briefing', { claude: { fiveHour: 0.95, fiveHourResetsAt: Date.now() / 1000 + 600 }, codex: { fiveHour: 0 } }, DEFAULT_CONFIG);
+  assert.ok(r.defer, 'espera a cota do Claude em vez de ir para o Codex');
+  assert.doesNotMatch(r.reason, /Codex/);
 });

@@ -26,7 +26,7 @@ const { Orchestrator } = require('../src/core/orchestrator');
 const { DEFAULT_CONFIG } = require('../src/core/config');
 
 // confirmContacts: confirmação do contato antes de mandar (no app vem ligada; aqui o padrão dos testes é enviar na hora).
-function setup({ confirmContacts = false, ...extra } = {}) {
+function setup({ confirmContacts = false, codexOff = false, ...extra } = {}) {
   calls.length = 0;
   const events = [];
   const store = (data) => ({ data, save() {} });
@@ -39,6 +39,8 @@ function setup({ confirmContacts = false, ...extra } = {}) {
       const c = structuredClone(DEFAULT_CONFIG);
       c.integrations.whatsapp.enabled = true;
       c.voice.commandsEnabled = true;
+      c.codex.enabled = true; // os testes cobrem a troca entre Claude e Codex
+      if (codexOff) c.codex.enabled = false;
       c.integrations.whatsapp.confirmContacts = confirmContacts;
       return c;
     },

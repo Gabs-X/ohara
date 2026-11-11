@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { route, classify } = require('../src/core/router');
-const { DEFAULT_CONFIG: config } = require('../src/core/config');
+const { DEFAULT_CONFIG } = require('../src/core/config');
+
+// Os testes cobrem o roteamento com o Codex ligado; o padrão (desligado) tem testes próprios no fim.
+const config = structuredClone(DEFAULT_CONFIG);
+config.codex.enabled = true;
 
 const r = (prompt, extra = {}) => route(prompt, { config, usage: {}, ...extra });
 
@@ -102,4 +106,19 @@ test('pedido que precisa do Chrome logado vai para o Claude, mesmo citando um pr
   assert.ok(blocked.reasons.some((x) => /sem navegador/.test(x)));
   // Escolha manual continua valendo.
   assert.equal(r(p, { projects, browser: true, override: 'codex:medium' }).provider, 'codex');
+});
+
+test('Codex desligado (o padrão): nada vai para ele, nem por categoria, cota, preferência ou escolha manual', () => {
+  const off = DEFAULT_CONFIG;
+  assert.equal(off.codex.enabled, false);
+  const ro = (prompt, extra = {}) => route(prompt, { config: off, usage: {}, ...extra });
+  const codigo = ro('corrige o bug na função de login do repositório');
+  assert.equal(codigo.provider, 'claude');
+  assert.ok(codigo.model);
+  assert.ok(codigo.reasons.some((x) => /Codex está desligado/.test(x)));
+  assert.equal(ro('escreva um email para o cliente', { usage: { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0.1 } } }).provider, 'claude');
+  assert.equal(ro('escreva um email para o cliente', { learned: { escrita: 'codex:high' } }).provider, 'claude');
+  const manual = ro('qualquer coisa', { override: 'codex:high' });
+  assert.equal(manual.provider, 'claude');
+  assert.equal(manual.model, off.claude.models.profundo);
 });

@@ -24,14 +24,17 @@ const util = (l) => (l ? Math.max(l.fiveHour ?? 0, l.weekly ?? 0) : 0);
  */
 function pickProvider(feature, limits, config) {
   const f = config.features?.[feature] || {};
-  if (f.provider === 'claude' || f.provider === 'codex') return { provider: f.provider };
+  // Codex desligado nos Ajustes: nem "Sempre Codex" nem a reserva por cota usam ele.
+  const codexOn = config.codex?.enabled === true;
+  if (f.provider === 'claude' || (f.provider === 'codex' && codexOn)) return { provider: f.provider };
+  if (f.provider === 'codex') return { provider: 'claude' };
 
   const background = !!f.background;
   const b = config.budgets;
   const claudeMax = background ? b.backgroundClaude : config.quota.claudeAvoidAt;
   const codexMax = background ? b.backgroundCodex : config.quota.codexAvoidAt;
   const c = limits.claude;
-  const x = limits.codex;
+  const x = codexOn ? limits.codex : { status: 'rejected' };
 
   if (c?.status !== 'rejected' && util(c) < claudeMax) return { provider: 'claude' };
   if (x?.status !== 'rejected' && util(x) < codexMax) return { provider: 'codex' };
@@ -40,7 +43,8 @@ function pickProvider(feature, limits, config) {
   // Adia até a primeira janela que renovar.
   const resets = [c?.fiveHourResetsAt, x?.fiveHourResetsAt].filter(Boolean).map((s) => s * 1000).filter((t) => t > Date.now());
   const retryAt = resets.length ? Math.min(...resets) + 60_000 : Date.now() + 30 * 60_000;
-  return { defer: retryAt, reason: `cota acima do orçamento de segundo plano (Claude ${Math.round(util(c) * 100)}%, Codex ${Math.round(util(x) * 100)}%)` };
+  const codexPart = codexOn ? `, Codex ${Math.round(util(x) * 100)}%` : '';
+  return { defer: retryAt, reason: `cota acima do orçamento de segundo plano (Claude ${Math.round(util(c) * 100)}%${codexPart})` };
 }
 
 function tryJson(s) {

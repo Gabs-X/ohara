@@ -20,6 +20,8 @@ class UsageTracker {
     this.store = store; // JsonStore { days: {}, limits: { claude, codex } }
     if (!this.store.data.days) this.store.data.days = {};
     if (!this.store.data.limits) this.store.data.limits = { claude: null, codex: null };
+    // Trocado pelo main.js: com o Codex desligado nos Ajustes, nem lê as sessões de ~/.codex.
+    this.codexOn = () => true;
   }
 
   day(key = today()) {
@@ -63,6 +65,7 @@ class UsageTracker {
   // Lê o "rate_limits" mais recente das sessões do Codex.
   // Nunca lança: é chamado no fim de cada resposta e um erro aqui impediria o "chat:done".
   refreshCodexLimits() {
+    if (!this.codexOn()) return null;
     try {
       const file = latestCodexSession();
       if (!file) return this.store.data.limits.codex;
@@ -101,7 +104,7 @@ class UsageTracker {
       if (y.weeklyResetsAt && now > y.weeklyResetsAt) y.weekly = 0;
       return y;
     };
-    return { claude: fix(l.claude), codex: fix(l.codex) };
+    return { claude: fix(l.claude), codex: this.codexOn() ? fix(l.codex) : null };
   }
 
   summary() {

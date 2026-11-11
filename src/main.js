@@ -172,6 +172,7 @@ const autoStore = store('automations.json', {});
 const stores = [chatsStore, usageStore, prefsStore, meetingsStore, insightsStore, autoStore];
 
 const usage = new UsageTracker(usageStore);
+usage.codexOn = () => config.codex?.enabled === true;
 
 // Envia para todas as janelas (principal e rápida).
 const send = (channel, payload) => {
@@ -317,6 +318,7 @@ function updateConfig(partial) {
   if (partial.codex?.developmentPermissions !== undefined && !['restricted', 'full'].includes(partial.codex.developmentPermissions)) {
     throw new Error('Permissão de desenvolvimento inválida.');
   }
+  if (partial.codex?.enabled !== undefined && typeof partial.codex.enabled !== 'boolean') throw new Error('Valor inválido para "Usar o Codex".');
   // Ignora o marcador "••••••" que a interface mostra no lugar do segredo.
   for (const p of SECRETS) if (getIn(partial, p) === '••••••') setIn(partial, p, undefined);
   const user = encryptSecrets(deepMerge(readUserConfig(), partial));
@@ -327,6 +329,7 @@ function updateConfig(partial) {
   if (partial.integrations?.calendarIcsUrl !== undefined) calendar.refresh(true);
   if (partial.integrations?.slack) slack.users = null;
   const pub = publicConfig();
+  if (partial.codex?.enabled !== undefined && !partial.voice) send('config:changed', pub); // some/volta o Codex nos menus
   if (partial.voice) {
     if (partial.voice.wakeWord !== undefined) {
       if (!config.voice.wakeWord) endVoiceSession(false);
