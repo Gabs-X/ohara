@@ -14,7 +14,7 @@ const DEFAULT_CONFIG = {
     toggle: 'CommandOrControl+Space', // mostra/esconde a janela principal
     quick: 'Alt+Space', // janela rápida
     clipboard: 'CommandOrControl+Alt+Space', // janela rápida com o conteúdo copiado
-    fixText: 'CommandOrControl+Alt+C', // corrige o texto selecionado em qualquer app e cola no lugar
+    fixText: 'CommandOrControl+Shift+F8', // corrige o texto selecionado em qualquer app e cola no lugar
     voice: '', // fala → texto (Whisper)
   },
 

@@ -19,10 +19,13 @@ Corrija apenas:
 - acentos e cedilha;
 - pontuação e letra maiúscula no início das frases;
 - concordância quando estiver claramente errada.
+- expanda abreviações informais de mensagens para as palavras completas: vc/vcs → você/vocês, tb/tbm → também, blz → beleza, q → que, hj → hoje, msg → mensagem;
+- expanda pq conforme o contexto (por que, porque, por quê ou porquê), sem adivinhar abreviações ambíguas.
 
 Mantenha o jeito de escrever da pessoa:
 - não mude o tom, o nível de formalidade nem a escolha de palavras;
-- mantenha gírias, abreviações intencionais (vc, tbm, pq, blz), risadas (kkk, rs), emojis, links, @menções, nomes e termos técnicos;
+- mantenha gírias, risadas (kkk, rs), emojis, links, @menções, nomes e termos técnicos;
+- preserve siglas, identificadores e abreviações técnicas (API, PR5421, URLs); expanda apenas abreviações informais cujo significado esteja claro no contexto;
 - mantenha as quebras de linha, listas e a formatação;
 - não traduza, não resuma, não acrescente nem tire informações e não responda ao conteúdo;
 - se o texto já estiver correto, devolva igual.

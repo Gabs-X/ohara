@@ -192,7 +192,7 @@ Para ajustar (em `config.json`): `meetings.folder`, `meetings.model`, `meetings.
 | `Ctrl+Espaço` | Mostra ou esconde a Central. |
 | `Alt+Espaço` | Janela rápida: pergunta e resposta por cima de tudo. |
 | `Ctrl+Alt+Espaço` | Janela rápida com o que você copiou: Explicar, Traduzir, Corrigir, Resumir, Diagnosticar erro. |
-| `Ctrl+Alt+C` | Corrige o texto selecionado em qualquer app (ortografia, acentos e pontuação, mantendo o seu jeito de escrever) e cola no lugar. Se você trocar de janela enquanto ela corrige, o texto corrigido fica copiado para colar com `Ctrl+V`. |
+| `Ctrl+Shift+F8` | Corrige o texto selecionado em qualquer app (ortografia, acentos, pontuação e abreviações como “vc” → “você” e “tbm” → “também”, mantendo o seu jeito de escrever) e cola no lugar. Preserva siglas e termos técnicos. Se você trocar de janela enquanto ela corrige, o texto corrigido fica copiado para colar com `Ctrl+V`. |
 | `Ctrl+Alt+V` | Fala: grava, transcreve com o Whisper e envia. |
 
 ### Funções automáticas e orçamento

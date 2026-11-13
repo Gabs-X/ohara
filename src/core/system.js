@@ -58,7 +58,7 @@ public static class K { [DllImport("user32.dll")] public static extern void keyb
 }
 
 // Envia Ctrl+<tecla> para a janela em foco, depois que você soltar Ctrl/Alt/Shift/Win do atalho
-// (senão o app receberia Ctrl+Alt+C e o atalho dispararia de novo).
+// (senão o app receberia Ctrl+Shift+F8 e o atalho dispararia de novo).
 // Compila o acesso ao teclado uma vez numa DLL em %TEMP% (compilar a cada uso custa ~2 s).
 const KEYS_SCRIPT = `
 $src = @'
@@ -67,18 +67,24 @@ public static class OharaKeys {
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
   [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int k);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint c, uint t);
 }
 '@
-$dll = Join-Path $env:TEMP 'OharaKeys-1.dll'
+$dll = Join-Path $env:TEMP 'OharaKeys-2.dll'
 try {
   if (-not (Test-Path $dll)) { Add-Type -TypeDefinition $src -OutputAssembly $dll }
   Add-Type -Path $dll
 } catch { Add-Type -TypeDefinition $src }
 $until = (Get-Date).AddSeconds(2)
 while ((Get-Date) -lt $until -and (@(0x10,0x11,0x12,0x5B,0x5C) | Where-Object { [OharaKeys]::GetAsyncKeyState($_) -band 0x8000 })) { Start-Sleep -Milliseconds 20 }
+function Key([byte]$k, [uint32]$up) {
+  $sc = [byte][OharaKeys]::MapVirtualKey($k, 0)
+  $ext = 0; if ($k -eq 0x2D) { $ext = 1 }
+  [OharaKeys]::keybd_event($k, $sc, ($up -bor $ext), [UIntPtr]::Zero)
+}
 function Send-Ctrl([byte]$k) {
-  [OharaKeys]::keybd_event(0x11,0,0,[UIntPtr]::Zero); [OharaKeys]::keybd_event($k,0,0,[UIntPtr]::Zero)
-  [OharaKeys]::keybd_event($k,0,2,[UIntPtr]::Zero); [OharaKeys]::keybd_event(0x11,0,2,[UIntPtr]::Zero)
+  Key 0x11 0; Start-Sleep -Milliseconds 30; Key $k 0; Start-Sleep -Milliseconds 30
+  Key $k 2; Start-Sleep -Milliseconds 30; Key 0x11 2
 }
 $fg = [string][OharaKeys]::GetForegroundWindow().ToInt64()
 `;
