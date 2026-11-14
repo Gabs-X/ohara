@@ -92,6 +92,7 @@ async function renderSettings() {
         <label>Ignorar reuniões antes de<input id="m-ignore" type="date" value="${esc(cfg.meetings.ignoreBefore || '')}"></label>
       </div>
       <label class="check"><input type="checkbox" id="m-on" ${cfg.meetings.enabled ? 'checked' : ''}> Monitorar a pasta</label>
+      <label class="check"><input type="checkbox" id="m-auto" ${cfg.meetings.autoAnalyze ? 'checked' : ''}> Analisar automaticamente cada reunião nova (gasta cota do Claude; desligado, você pede a análise na reunião)</label>
       <button class="btn small-btn" id="m-save">Salvar</button>
     </section>
 
@@ -198,6 +199,7 @@ async function renderSettings() {
         prepMinutes: Number($s('#m-prep').value) || 0,
         ignoreBefore: $s('#m-ignore').value || null,
         enabled: $s('#m-on').checked,
+        autoAnalyze: $s('#m-auto').checked,
       },
     }),
   );

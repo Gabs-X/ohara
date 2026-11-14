@@ -17,6 +17,7 @@ const COLS = [
 ];
 const PRIO = { alta: 0, media: 1, baixa: 2 };
 const STATUS_LABEL = {
+  aguardando: '🕓 aguardando análise',
   'na fila': '⏳ na fila',
   processando: '⚙️ processando',
   pronta: '',
@@ -90,11 +91,14 @@ async function renderMeetings() {
   renderMeetingList();
   const status = document.getElementById('mt-status');
   const pending = mt.data.meetings.filter((m) => m.status === 'na fila' || m.status === 'processando').length;
+  const aguardando = mt.data.meetings.filter((m) => m.status === 'aguardando').length;
   status.textContent = !mt.data.enabled
     ? 'monitoramento desligado'
     : pending
       ? `processando ${pending} reuni${pending > 1 ? 'ões' : 'ão'}…`
-      : `monitorando ${mt.data.folder}`;
+      : aguardando
+        ? `${aguardando} reuni${aguardando > 1 ? 'ões aguardando' : 'ão aguardando'} análise (só quando você pedir)`
+        : `monitorando ${mt.data.folder}`;
 
   const v = mt.view;
   setSeg(v === 'people' || v.startsWith('person:') ? 'people' : v === 'board' ? 'board' : '');
@@ -442,10 +446,11 @@ function renderMeetingDetail(m) {
       <button class="btn small-btn" id="d-save" title="Salvar .md na sua pasta do Claude">Salvar .md</button>
       <button class="btn small-btn" id="d-mail" title="Abrir e-mail com o resumo">Enviar resumo por e-mail</button>` : ''}
       <button class="btn small-btn" id="d-files">Abrir transcrição</button>
-      <button class="btn small-btn" id="d-reprocess">${m.status === 'ignorada' ? 'Processar mesmo assim' : 'Analisar novamente'}</button>
+      <button class="btn small-btn${m.status === 'aguardando' ? ' primary' : ''}" id="d-reprocess">${m.status === 'aguardando' ? '🔍 Analisar com o Claude' : m.status === 'ignorada' ? 'Processar mesmo assim' : 'Analisar novamente'}</button>
     </div>
     ${m.participants?.length ? `<p class="muted small">Participantes: ${esc(m.participants.join(', '))}</p>` : ''}
-    ${m.status !== 'pronta' && m.status !== 'sem demandas' ? `<p class="notice">Status: ${esc(m.status)}${m.reason ? ` — ${esc(m.reason)}` : ''}${m.retryAt ? ` · nova tentativa ${new Date(m.retryAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}
+    ${m.status === 'aguardando' ? `<p class="notice">Esta reunião ainda não foi analisada. A análise usa o Claude e gasta cota, então peça só se ela importar${m.falas ? ` (${m.falas} falas${m.durationMin ? `, ${m.durationMin} min` : ''})` : ''}.</p>` : ''}
+    ${m.status !== 'pronta' && m.status !== 'sem demandas' && m.status !== 'aguardando' ? `<p class="notice">Status: ${esc(m.status)}${m.reason ? ` — ${esc(m.reason)}` : ''}${m.retryAt ? ` · nova tentativa ${new Date(m.retryAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}
     ${s ? `
       <h2>Resumo</h2><p>${esc(s.resumo)}</p>
       <div class="grid2">

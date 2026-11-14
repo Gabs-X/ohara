@@ -195,13 +195,15 @@ class MeetingsService {
     const stableMs = (this.cfg.stableSeconds ?? 30) * 1000;
     const cutoff = this.cfg.ignoreBefore ? new Date(`${this.cfg.ignoreBefore}T00:00:00`).getTime() : 0;
     let changed = false;
+    const novas = []; // reuniões que chegaram e esperam você pedir a análise
 
     for (const g of Object.values(groups)) {
       const m = this.store.data.meetings[g.key];
       const sig = g.files.map((f) => `${f.path}|${f.size}|${Math.round(f.mtime)}`).sort().join(';');
       if (m && m.signature === sig) continue;
       const newest = Math.max(...g.files.map((f) => f.mtime));
-      if (now - newest < stableMs) {
+      // Com espera zero não adia: o mtime do arquivo pode ficar uma fração de ms à frente do relógio.
+      if (stableMs > 0 && now - newest < stableMs) {
         // Ainda sendo gravado: tenta de novo depois.
         clearTimeout(this.timers.get(g.key));
         this.timers.set(g.key, setTimeout(() => this.scan(), stableMs - (now - newest) + 1000));
@@ -216,9 +218,19 @@ class MeetingsService {
       if (cutoff && newest < cutoff) {
         meeting.status = 'ignorada';
         meeting.reason = 'anterior à ativação do painel';
-      } else {
+      } else if (this.cfg.autoAnalyze) {
         meeting.status = 'na fila';
         this.#enqueue(g.key);
+      } else {
+        // Análise sob pedido: nada de IA até você pedir (não gasta token com reunião que não precisa).
+        // Lê só o arquivo (de graça) para mostrar duração, participantes e falas na lista.
+        meeting.status = 'aguardando';
+        meeting.reason = null;
+        try {
+          const data = loadMeeting(meeting.files, { selfName: this.cfg.selfName });
+          Object.assign(meeting, { start: data.start, end: data.end, durationMin: data.durationMin, participants: data.participants, falas: data.count });
+        } catch { /* a lista mostra sem os detalhes */ }
+        novas.push(meeting);
       }
       changed = true;
     }
@@ -226,8 +238,13 @@ class MeetingsService {
       this.store.save();
       this.emit('meetings:update', this.snapshot());
     }
+    for (const m of novas) {
+      const quem = (m.participants || []).filter((p) => !/\(eu\)$/.test(p)).slice(0, 3).join(', ');
+      this.notify('Reunião nova gravada', `${quem ? `Com ${quem}. ` : ''}Abra em Reuniões e peça a análise se precisar.`);
+    }
   }
 
+  /** Análise pedida por você (ou nova tentativa): vai para a fila mesmo abaixo do mínimo de falas. */
   reprocess(key) {
     const m = this.store.data.meetings[key];
     if (!m) return;

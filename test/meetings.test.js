@@ -19,11 +19,11 @@ function transcript() {
   return lines.join('\n');
 }
 
-function service(folder) {
+function service(folder, extra = {}, avisos = []) {
   const store = { data: { meetings: {}, tasks: [], waiting: [] }, save() {} };
   const usage = { summary: () => ({}) };
-  const cfg = { meetings: { enabled: true, folder, selfName: 'Gabriel', stableSeconds: 0, minUtterances: 15 } };
-  return new MeetingsService({ store, usage, getConfig: () => cfg, emit() {}, notify() {} });
+  const cfg = { meetings: { enabled: true, folder, selfName: 'Gabriel', stableSeconds: 0, minUtterances: 15, autoAnalyze: true, ...extra } };
+  return new MeetingsService({ store, usage, getConfig: () => cfg, emit() {}, notify: (t, b) => avisos.push([t, b]) });
 }
 
 const until = async (fn, ms = 2000) => {
@@ -56,4 +56,38 @@ test('scan não lança mesmo com a pasta inexistente', () => {
   s.start(); // liga o timer mesmo sem a pasta, para pegar quando ela aparecer
   assert.ok(s.scanTimer);
   s.stop();
+});
+
+test('análise sob pedido: reunião nova espera, avisa sem gastar token e só analisa quando você pede', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohara-meet-'));
+  fs.writeFileSync(path.join(dir, 'meet-2026-11-13-xyz-abcd-efg.md'), transcript());
+  const avisos = [];
+  const s = service(dir, { autoAnalyze: false }, avisos);
+  const pedidas = answers.length;
+  s.scan();
+  const m = Object.values(s.store.data.meetings)[0];
+  assert.equal(m.status, 'aguardando');
+  assert.equal(m.falas, 20, 'lê o arquivo (de graça) para mostrar os detalhes');
+  assert.equal(s.queue.length, 0, 'nada vai para a IA sozinho');
+  assert.equal(avisos.length, 1);
+  assert.match(avisos[0][1], /peça a análise/);
+  // Ler de novo a mesma pasta não avisa outra vez.
+  s.scan();
+  assert.equal(avisos.length, 1);
+  assert.equal(answers.length, pedidas);
+  answers.push({ relevante: true, titulo: 'Relatório', tipo: 'alinhamento', resumo: 'r', topicos: [], decisoes: [], minhas_demandas: [], demandas_de_outros: [] });
+  s.reprocess(m.key);
+  await until(() => m.status === 'pronta');
+  assert.equal(m.title, 'Relatório');
+});
+
+test('análise sob pedido ignora o mínimo de falas (você pediu)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ohara-meet-'));
+  fs.writeFileSync(path.join(dir, 'meet-2026-11-13-cur-taaa-bbb.md'), transcript());
+  const s = service(dir, { autoAnalyze: false, minUtterances: 500 });
+  s.scan();
+  const m = Object.values(s.store.data.meetings)[0];
+  answers.push({ relevante: false, titulo: 'Curta', tipo: 'informal', resumo: 'r', topicos: [], decisoes: [], minhas_demandas: [], demandas_de_outros: [] });
+  s.reprocess(m.key);
+  await until(() => m.status === 'sem demandas');
 });

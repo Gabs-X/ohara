@@ -60,7 +60,7 @@ const DEFAULT_CONFIG = {
   // Modelo e prioridade de cada função automática.
   // model: rapido | equilibrado | profundo (ou um id); provider: auto | claude | codex
   features: {
-    meetings: { background: true, model: 'equilibrado', effort: 'medium', provider: 'auto' },
+    meetings: { background: true, model: 'equilibrado', effort: 'medium', provider: 'claude' }, // a análise de reunião é sempre no Claude
     briefing: { background: true, model: 'rapido', effort: 'low', provider: 'auto' },
     busca: { background: false, model: 'equilibrado', effort: 'medium', provider: 'auto' },
     cobranca: { background: false, model: 'rapido', effort: 'low', provider: 'auto' },
@@ -81,6 +81,9 @@ const DEFAULT_CONFIG = {
     selfName: 'Gabriel',
     stableSeconds: 30, // espera o arquivo parar de mudar
     minUtterances: 15, // abaixo disso a reunião é ignorada (não gasta token)
+    // false: reunião nova fica "aguardando análise" e só gasta token quando você pede (botão na reunião).
+    // true: cada reunião nova é analisada sozinha.
+    autoAnalyze: false,
     ignoreBefore: null, // "AAAA-MM-DD": não processa reuniões anteriores
     prepMinutes: 5, // aviso com a pauta antes de reuniões recorrentes
   },

@@ -58,16 +58,22 @@ test('roteador aprende após 3 escolhas iguais', () => {
 
 test('orçamento: segundo plano troca para o Codex antes do chat', () => {
   const limits = { claude: { fiveHour: 0.75 }, codex: { fiveHour: 0.1 } };
-  assert.equal(pickProvider('meetings', limits, config).provider, 'codex');
+  assert.equal(pickProvider('briefing', limits, config).provider, 'codex');
   assert.equal(pickProvider('busca', limits, config).provider, 'claude');
 });
 
 test('orçamento: com as duas cotas altas, segundo plano é adiado', () => {
   const reset = Math.floor(Date.now() / 1000) + 3600;
   const limits = { claude: { fiveHour: 0.8, fiveHourResetsAt: reset }, codex: { fiveHour: 0.9, fiveHourResetsAt: reset + 100 } };
-  const r = pickProvider('meetings', limits, config);
+  const r = pickProvider('briefing', limits, config);
   assert.ok(r.defer);
   assert.ok(r.defer >= reset * 1000);
+});
+
+test('análise de reunião é sempre no Claude, mesmo com o Codex ligado e a cota do Claude alta', () => {
+  assert.equal(DEFAULT_CONFIG.features.meetings.provider, 'claude');
+  assert.equal(DEFAULT_CONFIG.meetings.autoAnalyze, false, 'reunião nova espera você pedir a análise');
+  assert.equal(pickProvider('meetings', { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0 } }, config).provider, 'claude');
 });
 
 test('Codex desligado (o padrão): as funções automáticas não usam ele nem como reserva', () => {
