@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; media-src 'self' blob: mediastream:">
+  <title>Ohara · Entrevista</title>
+  <link rel="stylesheet" href="interview.css">
+</head>
+<body>
+  <header>
+    <span id="dot" data-mode="off" aria-hidden="true"></span>
+    <span id="status" role="status" aria-live="polite">Parado</span>
+    <span id="level" aria-hidden="true"><i></i></span>
+    <button id="close" class="icon" title="Fechar (para de ouvir)" aria-label="Fechar">×</button>
+  </header>
+
+  <div class="actions">
+    <button id="toggle" class="primary">Começar a ouvir</button>
+    <button id="now" title="Analisa o que já foi dito, sem esperar a pausa" disabled>Responder agora</button>
+    <button id="context" title="Abre o contexto.md (currículo e vaga)">Contexto</button>
+  </div>
+
+  <main id="cards" aria-live="polite">
+    <p class="empty" id="empty">
+      Clique em <b>Começar a ouvir</b> com o Teams aberto. A Ohara ouve o áudio do PC (a voz de quem entrevista),
+      e cada pergunta vira um cartão com tópicos de resposta em inglês.
+      <br><br>Use fone de ouvido ou alto-falante: os dois funcionam. Seu microfone não é captado.
+    </p>
+  </main>
+
+  <details id="transcript-box">
+    <summary>Transcrição ao vivo</summary>
+    <div id="transcript"></div>
+  </details>
+
+  <form id="manual">
+    <input id="manual-text" placeholder="Digite uma pergunta (se a transcrição falhar)…" autocomplete="off">
+    <button type="submit">Enviar</button>
+  </form>
+
+  <script src="interview.js"></script>
+</body>
+</html>

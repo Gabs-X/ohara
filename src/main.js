@@ -27,6 +27,7 @@ const { NeuralTTS, NEURAL_VOICES, isNeural, cleanForSpeech, splitForSpeech, take
 const { matchWake, isEndPhrase, isMicOff } = require('./core/wake');
 const textFix = require('./core/text-fix');
 const { askOnce } = require('./core/ai');
+const { InterviewService } = require('./core/interview');
 
 // Desenvolvimento: CENTRAL_DATA_DIR usa outra pasta de dados (e permite rodar ao lado do app instalado).
 if (process.env.CENTRAL_DATA_DIR) app.setPath('userData', process.env.CENTRAL_DATA_DIR);
@@ -79,6 +80,7 @@ const ICON = path.join(__dirname, 'assets', 'icon.png');
 let win = null;
 let quick = null;
 let listeningIndicator = null;
+let interviewWin = null;
 let listeningStatus = { mode: 'off', text: 'Microfone desligado' };
 let tray = null;
 let quitting = false;
@@ -176,7 +178,7 @@ usage.codexOn = () => config.codex?.enabled === true;
 
 // Envia para todas as janelas (principal e rápida).
 const send = (channel, payload) => {
-  for (const w of [win, quick, listeningIndicator]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
+  for (const w of [win, quick, listeningIndicator, interviewWin]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
 };
 
 // ---------- Fala ----------
@@ -453,6 +455,7 @@ const calendar = new Calendar({ getConfig });
 const github = new GitHub({ getConfig });
 const slack = new Slack({ getConfig });
 const whisper = new Whisper({ dir: path.join(dataDir, 'whisper'), getConfig });
+const interview = new InterviewService({ whisper, getConfig, emit: send, dataDir, usage });
 const neuralTts = new NeuralTTS({ dir: path.join(os.tmpdir(), 'ohara-fala') });
 const insights = new Insights({ meetings, store: insightsStore, usage, getConfig, emit: send, notify, calendar });
 let trayRebuild = () => {};
@@ -622,6 +625,47 @@ function showQuick(payload = { mode: 'ask' }) {
   quick.webContents.send('quick:open', payload);
 }
 
+// Modo entrevista: janela estreita no canto direito, por cima do Teams. Criada só quando usada.
+function toggleInterview() {
+  if (interviewWin && !interviewWin.isDestroyed()) {
+    if (interviewWin.isVisible()) interviewWin.hide();
+    else interviewWin.showInactive();
+    return;
+  }
+  const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = 420;
+  const height = Math.min(720, area.height - 40);
+  interviewWin = new BrowserWindow({
+    width, height, minWidth: 320, minHeight: 360,
+    x: area.x + area.width - width - 16, y: area.y + 20,
+    frame: false, alwaysOnTop: true, skipTaskbar: false, show: false,
+    title: 'Ohara · Entrevista', icon: ICON, backgroundColor: '#121722',
+    // Continua ouvindo e processando com o foco no Teams.
+    webPreferences: { ...webPreferences(), backgroundThrottling: false },
+  });
+  interviewWin.setAlwaysOnTop(true, 'floating');
+  interviewWin.loadFile(path.join(__dirname, 'renderer', 'interview.html'));
+  interviewWin.once('ready-to-show', () => interviewWin.show());
+  interviewWin.on('closed', () => {
+    interview.stop();
+    interviewWin = null;
+  });
+  secureWindow(interviewWin);
+  if (process.argv.includes('--dev')) interviewWin.webContents.openDevTools({ mode: 'detach' });
+  // Desenvolvimento: CENTRAL_INTERVIEW_TEST=arquivo.png começa a ouvir, espera CENTRAL_WAIT ms, salva um print e fecha.
+  if (process.env.CENTRAL_INTERVIEW_TEST) {
+    interviewWin.webContents.once('did-finish-load', async () => {
+      await new Promise((r) => setTimeout(r, 800));
+      await interviewWin.webContents.executeJavaScript("document.getElementById('toggle').click()", true);
+      await new Promise((r) => setTimeout(r, Number(process.env.CENTRAL_WAIT || 30000)));
+      fs.writeFileSync(process.env.CENTRAL_INTERVIEW_TEST, (await interviewWin.webContents.capturePage()).toPNG());
+      fs.writeFileSync(`${process.env.CENTRAL_INTERVIEW_TEST}.json`, JSON.stringify(interview.snapshot(), null, 2));
+      quitting = true;
+      app.quit();
+    });
+  }
+}
+
 function toggleWindow() {
   if (!win) return;
   if (win.isVisible() && win.isFocused()) {
@@ -694,6 +738,7 @@ function createTray() {
         { label: 'Janela rápida', click: () => showQuick({ mode: 'ask' }) },
         { label: 'Hoje', click: () => showView('today') },
         { label: 'Painel de demandas', click: () => showView('meetings') },
+        { label: 'Modo entrevista', click: () => toggleInterview() },
         { type: 'separator' },
         ...automations.snapshot().routines.slice(0, 6).map((r) => ({ label: `${r.icon} ${r.name}`, click: () => { showView('chat'); automations.runRoutine(r.id); } })),
         { type: 'separator' },
@@ -730,6 +775,7 @@ function registerHotkeys() {
   bind('quick', h.quick, () => (quick?.isVisible() ? quick.hide() : showQuick({ mode: 'ask' })));
   bind('clipboard', h.clipboard, () => showQuick({ mode: 'clipboard', text: clipboard.readText() }));
   bind('fixText', h.fixText, guarded('correção de texto', fixSelectedText));
+  bind('interview', h.interview, toggleInterview);
 }
 
 // ---------- Correção do texto selecionado (qualquer app) ----------
@@ -948,6 +994,20 @@ function registerIpc() {
     quick.setSize(w, Math.max(120, Math.min(640, Math.round(height))));
   });
   handle('quick:pin', (on) => { if (quick) quick.__pinned = !!on; });
+
+  // Modo entrevista (só a própria janela da entrevista manda áudio)
+  const fromInterview = (event) => interviewWin && event.sender === interviewWin.webContents;
+  handle('interview:snapshot', () => interview.snapshot());
+  handleSafe('interview:start', () => interview.start());
+  handle('interview:stop', () => interview.stop());
+  ipcMain.handle('interview:audio', (event, bytes, opts) => {
+    if (fromInterview(event) && bytes?.byteLength) interview.addAudio(bytes, opts || {});
+  });
+  ipcMain.handle('interview:turnEnd', (event) => { if (fromInterview(event)) interview.turnEnd(); });
+  handle('interview:answerNow', () => interview.answerNow());
+  handle('interview:ask', (text) => interview.ask(String(text || '').slice(0, 2000)));
+  handle('interview:openContext', () => shell.openPath(interview.ensureContext()));
+  handle('interview:hide', () => interviewWin?.hide());
   handle('quick:openInMain', (chatId) => {
     quick?.hide();
     showView('chat');
@@ -960,15 +1020,29 @@ app.on('second-instance', () => toggleWindow());
 
 app.whenReady().then(() => {
   app.setAppUserModelId('com.gabsx.central-ia');
-  // Sem captura de microfone nesta edição.
-  session.defaultSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  // Sem captura de microfone nesta edição. A única exceção é a janela do modo entrevista,
+  // que capta o áudio do PC (loopback: a voz de quem está na call), nunca o microfone.
+  const isInterview = (wc) => !!interviewWin && !interviewWin.isDestroyed() && wc === interviewWin.webContents;
+  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(isInterview(wc) && ['media', 'display-capture'].includes(permission)));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => isInterview(wc) && ['media', 'display-capture'].includes(permission));
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    const main = interviewWin && !interviewWin.isDestroyed() ? interviewWin.webContents.mainFrame : null;
+    const f = request.frame;
+    if (!main || !f || f.processId !== main.processId || f.routingId !== main.routingId) return callback({});
+    try {
+      const [source] = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
+      callback(source ? { video: source, audio: 'loopback' } : {});
+    } catch {
+      callback({});
+    }
+  });
 
   enableAutoStartOnce();
   setTimeout(() => cleanupOldVersionsOnce().catch(() => {}), 5000);
   registerIpc();
   createWindow();
   createQuick();
+  if (process.env.CENTRAL_INTERVIEW_TEST) toggleInterview();
 
   trayRebuild = createTray();
   registerHotkeys();
@@ -991,6 +1065,7 @@ app.on('before-quit', () => {
   quitting = true;
   meetings.stop();
   automations.stop();
+  interview.stop();
   for (const s of stores) s.flush(); // flush não lança: um arquivo preso não impede salvar os outros
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());

@@ -109,6 +109,20 @@ contextBridge.exposeInMainWorld('central', {
   quickPin: inv('quick:pin'),
   quickOpenInMain: inv('quick:openInMain'),
 
+  // Modo entrevista
+  interviewSnapshot: inv('interview:snapshot'),
+  interviewStart: inv('interview:start'),
+  interviewStop: inv('interview:stop'),
+  interviewAudio: inv('interview:audio'),
+  interviewTurnEnd: inv('interview:turnEnd'),
+  interviewAnswerNow: inv('interview:answerNow'),
+  interviewAsk: inv('interview:ask'),
+  interviewOpenContext: inv('interview:openContext'),
+  interviewHide: inv('interview:hide'),
+  onInterviewStatus: on('interview:status'),
+  onInterviewCard: on('interview:card'),
+  onInterviewLine: on('interview:line'),
+
   // Eventos
   onRoute: on('chat:route'),
   onEvent: on('chat:event'),

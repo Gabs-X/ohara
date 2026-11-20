@@ -16,6 +16,7 @@ const DEFAULT_CONFIG = {
     clipboard: 'CommandOrControl+Alt+Space', // janela rápida com o conteúdo copiado
     fixText: 'CommandOrControl+Shift+F8', // corrige o texto selecionado em qualquer app e cola no lugar
     voice: '', // fala → texto (Whisper)
+    interview: 'CommandOrControl+Alt+E', // abre/esconde o modo entrevista
   },
 
   claude: {
@@ -122,6 +123,15 @@ const DEFAULT_CONFIG = {
     wakeWord: false, // escuta contínua: diga "Ohara, ..." (precisa do Whisper)
     showListeningIndicator: false, // indicador flutuante, inclusive com a janela escondida
     autoSendVoice: false, // na janela rápida, envia assim que transcreve
+  },
+
+  // Modo entrevista (bandeja → Modo entrevista ou Ctrl+Alt+E): ouve o áudio do PC, transcreve em inglês
+  // e mostra tópicos de resposta para cada pergunta. Currículo e vaga ficam em %APPDATA%\Ohara\entrevista\contexto.md.
+  interview: {
+    whisperModel: 'small', // small acerta bem o inglês (~3 s por trecho); base é mais rápido e erra mais
+    model: 'haiku', // modelo do Claude para os tópicos (rápido)
+    minWords: 4, // fala menor que isso, sem cara de pergunta, não chama a IA
+    historyLines: 14, // falas anteriores mandadas junto, para entender perguntas de continuação
   },
 };
 
