@@ -389,7 +389,10 @@ class InterviewService {
       const outDir = this.transcriptsDir();
       fs.mkdirSync(outDir, { recursive: true });
       const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
+      // Duas entrevistas no mesmo minuto não podem apagar a transcrição uma da outra.
+      let n = 1;
       this.logFile = path.join(outDir, `entrevista-${stamp}.md`);
+      while (fs.existsSync(this.logFile)) this.logFile = path.join(outDir, `entrevista-${stamp}-${++n}.md`);
       fs.writeFileSync(this.logFile, `# Entrevista · ${new Date().toLocaleString('pt-BR')}\n\n`, 'utf8');
     }
     this.lastActivity = Date.now();
@@ -429,6 +432,8 @@ class InterviewService {
   stop() {
     this.lastActivity = Date.now();
     this.active = false;
+    // Os trechos que ficaram na fila não serão transcritos: apaga o áudio (nada de voz guardada no disco).
+    for (const item of [...this.queue, ...this.myQueue]) fs.rm(item.file, { force: true }, () => {});
     this.queue.length = 0;
     this.myQueue.length = 0;
     this.server?.stop();
@@ -605,14 +610,21 @@ class InterviewService {
       earlier: fresh ? buildEarlier({ lines: earlierLines, cards: this.cards.filter((c) => c.id !== card.id) }) : '',
     });
     let dismissedEarly = false;
-    const r = await this.session.ask(message, (text) => {
-      const p = parseAnswer(text);
-      if (p.none && !dismissedEarly) {
-        dismissedEarly = true;
-        this.emit('interview:card', { ...card, state: 'dismissed' });
-      } else if (!p.pending && !p.none && !p.same) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
-    });
-    this.analyzing = false;
+    let r;
+    try {
+      r = await this.session.ask(message, (text) => {
+        const p = parseAnswer(text);
+        if (p.none && !dismissedEarly) {
+          dismissedEarly = true;
+          this.emit('interview:card', { ...card, state: 'dismissed' });
+        } else if (!p.pending && !p.none && !p.same) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
+      });
+    } catch (err) {
+      // Sem isto, "analyzing" ficava preso em true e as perguntas seguintes eram ignoradas em silêncio.
+      r = { text: '', error: err?.message || String(err) };
+    } finally {
+      this.analyzing = false;
+    }
 
     const parsed = parseAnswer(r.text);
     const finishedAt = Date.now();

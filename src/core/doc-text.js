@@ -7,11 +7,15 @@ const zlib = require('zlib');
 const TEXT_EXT = new Set(['.txt', '.md', '.csv', '.json', '.html', '.htm', '.xml', '.rtf', '.log']);
 const SUPPORTED_EXT = new Set([...TEXT_EXT, '.docx', '.pdf']);
 const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_UNZIPPED = 100 * 1024 * 1024;
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
 function decodeEntities(s) {
   return s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => {
-    if (e[0] === '#') return String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10));
+    if (e[0] === '#') {
+      const cp = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(cp) && cp <= 0x10ffff ? String.fromCodePoint(cp) : m; // entidade inválida: deixa como está
+    }
     return ENTITIES[e.toLowerCase()] ?? m;
   });
 }
@@ -42,7 +46,15 @@ function readZipEntry(buf, wanted) {
       const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
       const data = buf.subarray(start, start + compSize);
       if (method === 0) return Buffer.from(data);
-      if (method === 8) return zlib.inflateRawSync(data);
+      // Limite na saída: um .docx pequeno que descompacta para GBs ("zip bomb") derrubaria o app.
+      if (method === 8) {
+        try {
+          return zlib.inflateRawSync(data, { maxOutputLength: MAX_UNZIPPED });
+        } catch (e) {
+          if (e.code === 'ERR_BUFFER_TOO_LARGE' || e instanceof RangeError) throw new Error('O documento descompactado passa de 100 MB: grande demais para ler.');
+          throw e;
+        }
+      }
       return null;
     }
     p += 46 + nameLen + extraLen + commentLen;

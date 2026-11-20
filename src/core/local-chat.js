@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { TOOL_DEFS, runPcTool, guessTools } = require('./pc-tools');
+const { ollamaUrl } = require('./providers/ollama');
 
 const MAX_HISTORY_CHARS = 14_000; // ~4 mil tokens de histórico; cabe folgado nos 16 mil do contexto
 const MAX_MSG_CHARS = 2500;
@@ -69,7 +70,7 @@ const transcript = (history, n, max) =>
 // Uma chamada ao Ollama. Com onDelta, vai mostrando o texto enquanto chega.
 async function ollamaChat({ config, messages, signal, onDelta, format, temperature }) {
   const o = config.ollama || {};
-  const url = `${o.url || 'http://127.0.0.1:11434'}/api/chat`;
+  const url = `${ollamaUrl(config)}/api/chat`;
   const timeout = AbortSignal.timeout((o.timeoutSec || 180) * 1000);
   const options = { num_ctx: o.contextTokens || 16384 };
   if (temperature != null) options.temperature = temperature;
@@ -122,7 +123,7 @@ async function ollamaChat({ config, messages, signal, onDelta, format, temperatu
 // Uma chamada ao Ollama sem streaming, oferecendo as ferramentas do PC.
 async function ollamaToolCall({ config, messages, signal, tools }) {
   const o = config.ollama || {};
-  const url = `${o.url || 'http://127.0.0.1:11434'}/api/chat`;
+  const url = `${ollamaUrl(config)}/api/chat`;
   const timeout = AbortSignal.timeout((o.timeoutSec || 180) * 1000);
   let res;
   try {

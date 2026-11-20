@@ -7,6 +7,7 @@ const { runJsonl, shorten } = require('./providers/common');
 const { resolveCodex } = require('./providers/codex');
 const { claudeEnv, friendlyError } = require('./providers/claude');
 const { anonymize, deanonymize } = require('./local-tools');
+const { ollamaUrl } = require('./providers/ollama');
 
 class DeferError extends Error {
   constructor(retryAt, reason) {
@@ -81,9 +82,10 @@ async function claudeOnce({ prompt, schema, model, effort, config, usage, signal
       if (ev.type === 'result') {
         u = ev.usage || {};
         cost = ev.total_cost_usd || 0;
-        if (ev.is_error) error = ev.result || ev.subtype;
+        if (ev.is_error) error = ev.result || ev.subtype || 'erro';
         text = ev.result || '';
-        out = schema ? ev.structured_output || tryJson(ev.result) : text;
+        // Com erro (cota, API Error 529...) o "result" é a mensagem de erro, não a resposta.
+        out = error ? null : schema ? ev.structured_output || tryJson(ev.result) : text;
       }
     },
   });
@@ -140,7 +142,7 @@ async function ollamaOnce({ prompt, schema, config, signal }) {
   if (o.contextTokens) body.options = { num_ctx: o.contextTokens };
   let res;
   try {
-    res = await fetch(`${o.url || 'http://127.0.0.1:11434'}/api/chat`, {
+    res = await fetch(`${ollamaUrl(config)}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
@@ -189,7 +191,13 @@ async function askOnce(o) {
   let map = null;
   if (priv.anonymizeCloud) {
     const keep = [...(priv.keep || []), o.config.meetings?.selfName].filter(Boolean);
-    const a = await anonymize({ config: o.config, text: o.prompt, names: priv.names !== false, keep, signal: o.signal });
+    let a;
+    try {
+      a = await anonymize({ config: o.config, text: o.prompt, names: priv.names !== false, keep, signal: o.signal, strict: true });
+    } catch (e) {
+      if (o.signal?.aborted) throw e;
+      throw new Error(`A privacidade está ligada, mas ${e.message}. Nada foi enviado para a nuvem.`);
+    }
     prompt = a.text;
     map = a.map;
   }

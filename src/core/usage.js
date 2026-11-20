@@ -74,7 +74,8 @@ class UsageTracker {
       const lines = text.split('\n').reverse();
       for (const line of lines) {
         if (!line.includes('"rate_limits"')) continue;
-        const obj = JSON.parse(line);
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; } // linha ainda sendo escrita pelo Codex
         const rl = findKey(obj, 'rate_limits');
         if (!rl?.primary) continue;
         this.store.data.limits.codex = {

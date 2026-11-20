@@ -109,7 +109,8 @@ class MeetingsService {
     this.backfillWaiting();
     // Retoma o que ficou pela metade (app fechado no meio, ou adiado pela cota).
     for (const m of Object.values(this.store.data.meetings)) {
-      if (m.status === 'na fila' || m.status === 'processando') this.#enqueue(m.key);
+      // start() também roda ao salvar os ajustes: não põe de novo na fila a reunião que está sendo analisada agora.
+      if ((m.status === 'na fila' || m.status === 'processando') && m.key !== this.current) this.#enqueue(m.key);
       if (m.status === 'adiada') {
         const wait = Math.max(5000, (m.retryAt || 0) - Date.now());
         this.timers.set(`retry:${m.key}`, setTimeout(() => this.reprocess(m.key), wait));
@@ -265,6 +266,7 @@ class MeetingsService {
     const key = this.queue.shift();
     if (!key) return;
     this.busy = true;
+    this.current = key;
     try {
       await this.#process(key);
     } catch (err) {
@@ -282,6 +284,7 @@ class MeetingsService {
       }
     } finally {
       this.busy = false;
+      this.current = null;
       this.store.save();
       this.emit('meetings:update', this.snapshot());
       this.#pump();

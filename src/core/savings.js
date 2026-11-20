@@ -37,7 +37,7 @@ function cost([pin, pout], input, output) {
  */
 function computeSavings(days, o = {}) {
   const prices = { ...PRICES, ...(o.prices || {}) };
-  const ref = prices[o.reference || REFERENCE];
+  const ref = prices[o.reference] || prices[REFERENCE]; // referência desconhecida: usa a padrão
   let actual = 0;
   let reference = 0;
   let calls = 0;

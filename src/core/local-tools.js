@@ -120,7 +120,9 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * Troca dados pessoais por marcadores ([PESSOA_1], [CPF_1]...). Devolve o texto e o mapa para desfazer.
  * Padrões fixos (CPF, CNPJ, e-mail...) sempre; nomes e endereços pelo modelo local, se `names` for true.
  */
-async function anonymize({ config, text, names = true, keep = [], signal, ai = llm }) {
+// strict: se o modelo local falhar ao procurar nomes, lança erro em vez de seguir só com os padrões
+// fixos. Quem vai mandar o texto para a nuvem usa strict, para nomes de clientes não saírem do PC.
+async function anonymize({ config, text, names = true, keep = [], signal, ai = llm, strict = false }) {
   const map = {};
   const reverse = new Map();
   const counters = {};
@@ -134,6 +136,7 @@ async function anonymize({ config, text, names = true, keep = [], signal, ai = l
     return t;
   };
   let out = String(text || '');
+  let namesFailed = false;
   for (const [kind, re] of PATTERNS) out = out.replace(re, (m) => tag(kind, m));
 
   if (names && out.trim()) {
@@ -146,6 +149,8 @@ async function anonymize({ config, text, names = true, keep = [], signal, ai = l
         for (const e of r.data.enderecos || []) found.ENDERECO.add(String(e).trim());
       } catch (e) {
         if (signal?.aborted) throw e;
+        if (strict) throw new Error(`não consegui procurar nomes com a IA local (${e.message})`);
+        namesFailed = true;
         break; // sem modelo local: fica só com os padrões fixos
       }
     }
@@ -155,7 +160,7 @@ async function anonymize({ config, text, names = true, keep = [], signal, ai = l
       for (const v of list) out = out.replace(new RegExp(`(?<![\\w\\[])${escapeRe(v)}(?![\\w\\]])`, 'g'), () => tag(kind, v));
     }
   }
-  return { text: out, map, count: Object.keys(map).length };
+  return { text: out, map, count: Object.keys(map).length, namesFailed };
 }
 
 /** Desfaz a anonimização em texto ou em qualquer objeto (respostas JSON). */

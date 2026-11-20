@@ -11,18 +11,22 @@ class JsonStore {
   }
 
   #load() {
-    let raw;
+    const parse = (file) => {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('formato inválido');
+      return { ...structuredClone(this.defaults), ...data };
+    };
+    // Se o app fechou no meio de uma gravação, o .tmp pode ser a única cópia íntegra.
+    const fromTmp = () => {
+      try { return parse(`${this.file}.tmp`); } catch { return null; }
+    };
+    if (!fs.existsSync(this.file)) return fromTmp() || structuredClone(this.defaults); // primeira execução
     try {
-      raw = fs.readFileSync(this.file, 'utf8');
+      return parse(this.file);
     } catch {
-      return structuredClone(this.defaults); // primeira execução
-    }
-    try {
-      return { ...structuredClone(this.defaults), ...JSON.parse(raw.replace(/^﻿/, '')) };
-    } catch {
-      // Arquivo corrompido: guarda uma cópia antes que a próxima gravação o substitua pelos padrões.
+      // Arquivo corrompido: guarda uma cópia antes que a próxima gravação o substitua.
       try { fs.copyFileSync(this.file, `${this.file}.corrompido-${Date.now()}`); } catch { /* sem cópia */ }
-      return structuredClone(this.defaults);
+      return fromTmp() || structuredClone(this.defaults);
     }
   }
 
