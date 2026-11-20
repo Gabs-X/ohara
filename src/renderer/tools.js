@@ -126,7 +126,7 @@ const PANELS = {
         <h2>Ler documento por foto</h2>
         <p class="muted small">RG, CNH, CPF, comprovante de residência, certidão ou página escaneada. Usa o modelo de visão local (a primeira leitura demora mais, enquanto ele carrega).</p>
         <button class="btn primary small-btn" id="tl-ph-file" ${disabled()}>${busyBtn('photo', '🖼️ Escolher imagem…')}</button>
-        ${tl.photoFile ? `<p><img class="tl-photo" src="${esc(`file:///${encodeURI(tl.photoFile.replace(/\\/g, '/'))}`)}" alt="Documento escolhido" /></p>` : ''}
+        ${tl.photoFile ? `<p><img class="tl-photo" src="${esc(fileUrl(tl.photoFile))}" alt="Documento escolhido" /></p>` : ''}
       </section>
       ${r ? `<section class="section"><div class="section-head"><h2>${esc(r.tipo_documento || 'Dados lidos')}</h2>${copyBtn('photo')}</div>
         ${r.legivel === false ? '<p class="tl-warn small">A imagem está difícil de ler: confira os dados com atenção.</p>' : ''}${fieldsHtml(r)}</section>` : ''}`;

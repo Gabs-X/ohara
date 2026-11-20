@@ -32,6 +32,7 @@ const { DocIndex } = require('./core/doc-index');
 const localTools = require('./core/local-tools');
 const localLlm = require('./core/local-llm');
 const { extractText } = require('./core/doc-text');
+const { isAppPage, sanitizeConfigPatch, assertSafeToOpen } = require('./core/ipc-guard');
 
 // Desenvolvimento: CENTRAL_DATA_DIR usa outra pasta de dados (e permite rodar ao lado do app instalado).
 if (process.env.CENTRAL_DATA_DIR) app.setPath('userData', process.env.CENTRAL_DATA_DIR);
@@ -483,12 +484,15 @@ function secureWindow(w) {
     return { action: 'deny' };
   });
   w.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file:')) {
-      e.preventDefault();
-      if (/^https?:|^mailto:/.test(url)) shell.openExternal(url);
-    }
+    // Só deixa navegar entre as páginas do próprio app. Um arquivo arrastado para a janela
+    // (ou um link file: qualquer) abriria com o preload e teria acesso à API da Ohara.
+    if (isAppPage(url, RENDERER_DIR)) return;
+    e.preventDefault();
+    if (/^https?:|^mailto:/.test(url)) shell.openExternal(url);
   });
 }
+
+const RENDERER_DIR = path.join(__dirname, 'renderer');
 
 const webPreferences = () => ({
   preload: path.join(__dirname, 'preload.js'),
@@ -870,7 +874,7 @@ function registerIpc() {
   handle('update:state', () => updater.state());
   handle('update:check', () => updater.check());
   handle('update:install', () => updater.install());
-  handle('config:set', (partial) => updateConfig(partial));
+  handle('config:set', (partial) => updateConfig(sanitizeConfigPatch(partial)));
   handle('development:check', () => require('./core/development').checkDevelopment({
     repo: config.selfRepo,
     desktopProbe: () => require('./core/desktop-probe').probeDesktop({ executable: process.execPath, appPath: app.getAppPath(), packaged: app.isPackaged }),
@@ -929,7 +933,7 @@ function registerIpc() {
   handle('tts:speak', (text, voice) => speak(text, voice));
   handle('tts:stop', () => stopSpeaking());
   handle('tts:voices', () => NEURAL_VOICES);
-  handle('shell:openPath', (p) => shell.openPath(p));
+  handle('shell:openPath', (p) => shell.openPath(assertSafeToOpen(p)));
   handle('shell:openExternal', (url) => (/^(https?|mailto):/.test(url) ? shell.openExternal(url) : null));
   handle('clipboard:write', (text) => clipboard.writeText(String(text || '')));
   handle('clipboard:read', () => clipboard.readText());

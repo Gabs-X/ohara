@@ -12,7 +12,8 @@ const MAX_MSG_CHARS = 1800;
 const MAX_ATTEMPTS = 3;
 
 // Falhas em que vale tentar outra IA (e não mostrar o erro de cara).
-const RETRYABLE = /cota|quota|limit|429|rate|esgot|exhaust|not logged|login|logad|auth|credential|não encontrei o programa|enoent|não respondeu|indisponível|unavailable|overloaded|529|500|502|503|timeout|ECONNREFUSED/i;
+// Palavras inteiras: "rate" não pode casar com "generate", nem "500" com um número qualquer.
+const RETRYABLE = /\b(cota\w*|quota\w*|limit\w*|rate.?limit\w*|esgot\w*|exhaust\w*|not logged|login|logad\w*|auth(?:entic\w*|ori[sz]ation\w*)?|unauthori[sz]ed|credential\w*|enoent|indisponível|unavailable|overloaded|timeout|timed out|econnrefused)\b|não encontrei o programa|não respondeu|\b(429|500|502|503|529)\b/i;
 
 function clip(text, max) {
   const s = String(text || '');
@@ -179,6 +180,12 @@ class GuideAgent {
     }
 
     const decision = this.#route(chat, text, { hasImage: images.length > 0, override, category });
+    // Dois pedidos ao mesmo tempo na mesma pasta misturam as fotos de antes/depois: o "Desfazer"
+    // de um reverteria também o outro. Planejar e a IA local não mexem em arquivos.
+    const touchesFiles = decision.provider && decision.provider !== 'ollama' && decision.category !== 'planejamento';
+    if (touchesFiles && chat.cwd && this.isRunning(chatId)) {
+      throw new Error('Esta conversa já está executando um pedido na pasta do projeto. Espere terminar ou clique em Parar.');
+    }
     const userIndex = chat.messages.length;
     chat.messages.push({ role: 'user', text: label || text, images, at: Date.now() });
     if (chat.title === 'Nova conversa') chat.title = clip((label || text).replace(/\s+/g, ' '), 48);
@@ -206,7 +213,7 @@ class GuideAgent {
     };
 
     // Planejar não mexe em arquivos: sem foto. A IA local também não mexe.
-    const before = decision.provider !== 'ollama' && decision.category !== 'planejamento' ? await this.#snapshot(chat.cwd, `antes: ${clip(label || text, 80)}`) : null;
+    const before = touchesFiles ? await this.#snapshot(chat.cwd, `antes: ${clip(label || text, 80)}`) : null;
     const attempts = [decision, ...(decision.fallbacks || [])].slice(0, MAX_ATTEMPTS);
     const failures = [];
     let result = null;
@@ -239,6 +246,7 @@ class GuideAgent {
         }
         const unmask = (v) => (map ? this.privacy.deanonymize(v, map) : v);
         let partial = '';
+        const toolsBefore = assistant.tools.length;
         result = await this.runProvider(t.provider, {
           prompt,
           systemPrompt: systemPrompt(config, chat.cwd, { explain: config.safety?.explain !== false })
@@ -264,14 +272,16 @@ class GuideAgent {
           result.anonymized = Object.keys(map).length;
         }
         if (!result.error || ac.signal.aborted) break;
-        // Já respondeu parte (mexeu em arquivos?): não repete em outra IA, mostra o erro.
-        if (partial.trim() || !RETRYABLE.test(result.error)) break;
+        // Já respondeu parte ou usou ferramentas (mexeu em arquivos?): não repete em outra IA, mostra o erro.
+        if (partial.trim() || assistant.tools.length > toolsBefore || !RETRYABLE.test(result.error)) break;
         failures.push(`${t.modelLabel || t.provider} falhou (${clip(result.error, 120)})`);
         delete chat.sessions[t.provider];
       }
     } finally {
       this.running.delete(runId);
     }
+    // Cancelado antes da primeira tentativa (ex.: durante a foto da pasta).
+    if (!result) result = { provider: used.provider, model: used.model, text: '', error: 'Cancelado.', tokens: {} };
 
     delete assistant.pending;
     assistant.provider = used.provider;

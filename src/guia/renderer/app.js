@@ -5,7 +5,18 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmtNum = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(Math.round(n || 0)));
 const usd = (n) => `US$ ${(n || 0).toFixed(n < 1 ? 3 : 2).replace('.', ',')}`;
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
-const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/, ''))}`;
+// Codifica cada pedaço do caminho (inclusive # e ?, que o encodeURI deixaria passar).
+const fileUrl = (p) => `file:///${String(p).replace(/\\/g, '/').replace(/^\/+/, '').split('/')
+  .map((seg, i) => (i === 0 && /^[a-z]:$/i.test(seg) ? seg : encodeURIComponent(seg))).join('/')}`;
+// A CSP (style-src 'self') bloqueia atributos style="" vindos de innerHTML. Os templates usam
+// data-css="..." e aqui o estilo é aplicado pelo CSSOM, que a CSP permite.
+function applyDataCss(node) {
+  if (node.nodeType !== 1) return;
+  const els = node.matches('[data-css]') ? [node, ...node.querySelectorAll('[data-css]')] : node.querySelectorAll('[data-css]');
+  for (const e of els) { e.style.cssText = e.dataset.css; e.removeAttribute('data-css'); }
+}
+new MutationObserver((muts) => muts.forEach((m) => m.addedNodes.forEach(applyDataCss)))
+  .observe(document.documentElement, { childList: true, subtree: true });
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || p;
 // Usados pela tela de Ferramentas (src/renderer/tools.js), que é a mesma da Ohara.
 function relTime(ts) {
@@ -112,7 +123,9 @@ async function refreshChats() {
 
 async function openChat(id) {
   state.chatId = id;
-  state.chat = await tryCall(guia.getChat(id));
+  const chat = await tryCall(guia.getChat(id));
+  if (state.chatId !== id) return; // clicou em outra conversa enquanto esta carregava
+  state.chat = chat;
   if (!state.chat) return newChat();
   renderMessages();
   await syncProjectSelect();
@@ -183,7 +196,7 @@ $('#project-select').addEventListener('change', async (e) => {
   if (v === '__new') {
     const card = openModal(`<h2>Novo projeto</h2><p class="muted">A Ohara cria uma pasta só para ele. Tudo o que a IA fizer fica lá dentro, com pontos de restauração.</p>
       <input type="text" id="np-name" placeholder="Nome do projeto, ex.: site do escritório" />
-      <div class="row" style="justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" id="np-ok">Criar</button></div>`);
+      <div class="row" data-css="justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" id="np-ok">Criar</button></div>`);
     const ok = async () => {
       try {
         const p = await call(guia.newProject(card.querySelector('#np-name').value));
@@ -309,13 +322,21 @@ async function send(textArg) {
     if (state.chatId && isBusy(state.chatId)) guia.cancel(state.chatId);
     return;
   }
-  const chat = await ensureChat().catch(() => null);
-  if (!chat) return;
-  const images = state.attachments.map((a) => a.path);
-  input.value = '';
+  // Limpa o campo antes de esperar a conversa ser criada: um Enter duplo não manda o mesmo pedido duas vezes.
+  const attachments = state.attachments;
+  const images = attachments.map((a) => a.path);
+  if (textArg === undefined) input.value = '';
   autosize();
   state.attachments = [];
   renderAttachments();
+  const chat = await ensureChat().catch(() => null);
+  if (!chat) {
+    if (textArg === undefined && !input.value) input.value = text;
+    state.attachments = attachments;
+    renderAttachments();
+    autosize();
+    return;
+  }
   const runId = uuid();
   const userMsg = { role: 'user', text: text || '(imagem)', images, at: Date.now() };
   state.chat.messages.push(userMsg);
@@ -328,7 +349,15 @@ async function send(textArg) {
   refreshChats();
   scrollBottom(true);
   $('#route-badge').hidden = true;
-  guia.send(chat.id, { text: text || 'Veja a imagem anexada.', images, override: $('#model-select').value, fullAccess: $('#full-access').checked, runId });
+  const r = await guia.send(chat.id, { text: text || 'Veja a imagem anexada.', images, override: $('#model-select').value, fullAccess: $('#full-access').checked, runId });
+  // Recusado antes de começar (conversa apagada, pedido já rodando na pasta...): não chega chat:done.
+  if (r?.ok === false && state.lives.has(runId)) {
+    state.lives.delete(runId);
+    markRunning(chat.id, runId, false);
+    fillAssistant(findMsgEl(runId), { ...live, error: r.error }, false);
+    toast(r.error, 'error');
+    refreshChats();
+  }
 }
 
 $('#send').addEventListener('click', () => send());
@@ -461,13 +490,13 @@ async function refreshQuota() {
     if (!p.ready) continue;
     if (p.id === 'ollama') { lines.push(`<div class="mini"><label><span>IA local</span><b>grátis</b></label></div>`); continue; }
     for (const [label, v] of quotaLines(p, u.limits[p.id])) {
-      lines.push(`<div class="mini"><label><span>${esc(label)}</span><b>${pct(v)}</b></label><div class="bar"><i class="${level(v)}" style="width:${Math.min(100, v * 100)}%"></i></div></div>`);
+      lines.push(`<div class="mini"><label><span>${esc(label)}</span><b>${pct(v)}</b></label><div class="bar"><i class="${level(v)}" data-css="width:${Math.min(100, v * 100)}%"></i></div></div>`);
     }
     if (!quotaLines(p, u.limits[p.id]).length) lines.push(`<div class="mini"><label><span>${esc(p.label)}</span><b class="muted">sem dados ainda</b></label></div>`);
   }
   const s = u.savingsWeek;
   box.innerHTML = `<h3>Cota das IAs</h3>${lines.join('') || '<span class="muted small">Nenhuma IA pronta.</span>'}
-    ${s.calls ? `<div class="mini muted">Economia na semana: <b style="color:var(--ok)">${pct(s.ratio)}</b></div>` : ''}`;
+    ${s.calls ? `<div class="mini muted">Economia na semana: <b data-css="color:var(--ok)">${pct(s.ratio)}</b></div>` : ''}`;
 }
 guia.onUsage(() => refreshQuota());
 
@@ -499,10 +528,10 @@ async function newPlanForm() {
     <p class="muted">Conte a ideia do seu jeito: o que quer criar, para quem, o que já tem. A Ohara monta um plano em etapas
       com um modelo forte${r?.modelLabel ? ` (agora: <b>${esc(r.modelLabel)}</b>)` : ''} e depois faz cada etapa com o modelo mais barato que resolve.</p>
     <textarea class="idea" id="plan-idea" placeholder="Ex.: quero um site para o escritório com página de contato e os serviços que a gente oferece. Não sei programar."></textarea>
-    <div class="row" style="margin-top:10px">
+    <div class="row" data-css="margin-top:10px">
       <label>Projeto (opcional)</label>
       <select id="plan-cwd"><option value="">Sem projeto ainda</option>${list.map((p) => `<option value="${esc(p.path)}">📂 ${esc(p.name)}</option>`).join('')}</select>
-      <span style="flex:1"></span>
+      <span data-css="flex:1"></span>
       <button class="btn primary" id="plan-go">Montar o plano</button>
     </div>
   </div>
@@ -538,7 +567,7 @@ async function renderPlan(id) {
   const next = plan.steps.find((s) => s.status === 'pendente');
   box.innerHTML = `
     <div class="card">
-      <div class="row"><h2 style="flex:1;margin:0">${esc(plan.title)}</h2>
+      <div class="row"><h2 data-css="flex:1;margin:0">${esc(plan.title)}</h2>
         ${plan.chatId ? '<button class="btn small" data-a="chat">💬 Conversa do plano</button>' : ''}
         <button class="btn small ghost danger" data-a="del">Apagar</button></div>
       ${plan.objective ? `<p><b>Objetivo:</b> ${esc(plan.objective)}</p>` : ''}
@@ -562,11 +591,11 @@ async function renderPlan(id) {
     ${plan.risks.length ? `<div class="card"><h2>⚠️ Cuidados</h2><ul>${plan.risks.map((q) => `<li>${esc(q)}</li>`).join('')}</ul></div>` : ''}
     <div class="card"><h2>✏️ Ajustar o plano</h2>
       <textarea class="idea" id="plan-fb" placeholder="Ex.: junta as etapas 2 e 3, e acrescenta uma etapa para colocar o site no ar."></textarea>
-      <div class="row" style="justify-content:flex-end;margin-top:8px"><button class="btn" id="plan-revise">Refazer o plano com o ajuste</button></div>
+      <div class="row" data-css="justify-content:flex-end;margin-top:8px"><button class="btn" id="plan-revise">Refazer o plano com o ajuste</button></div>
     </div>`;
   box.querySelector('[data-a=chat]')?.addEventListener('click', () => openChat(plan.chatId));
   box.querySelector('[data-a=del]').addEventListener('click', async () => {
-    const card = openModal(`<h2>Apagar o plano?</h2><p class="muted">A conversa do plano e os arquivos do projeto continuam.</p><div class="row" style="justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" id="del-ok">Apagar</button></div>`);
+    const card = openModal(`<h2>Apagar o plano?</h2><p class="muted">A conversa do plano e os arquivos do projeto continuam.</p><div class="row" data-css="justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" id="del-ok">Apagar</button></div>`);
     card.querySelector('#del-ok').addEventListener('click', async () => { closeModal(); await tryCall(guia.deletePlan(plan.id)); state.planId = null; renderPlans(); });
   });
   box.querySelectorAll('.step').forEach((el) => {
@@ -622,7 +651,7 @@ async function renderUsage() {
       <div class="card"><h2>Economia na semana</h2><div class="big ok">${pct(w.ratio)}</div>
         <p class="muted small">${w.calls} pedidos. Se tudo fosse no Claude Sonnet: <b>${usd(w.reference)}</b> · com a Ohara: <b>${usd(w.actual)}</b> (preço de API equivalente).</p></div>
       <div class="card"><h2>Últimos 30 dias</h2><div class="big">${usd(m.saved)}</div><p class="muted small">economizados em ${m.calls} pedidos (${pct(m.ratio)}).</p></div>
-      <div class="card"><h2>Pedidos por dia</h2><div class="days">${days.map((d) => `<div><i style="height:${(callsOf(d) / maxCalls) * 70}px"></i>${esc(d.date.slice(8))}/${esc(d.date.slice(5, 7))}</div>`).join('')}</div></div>
+      <div class="card"><h2>Pedidos por dia</h2><div class="days">${days.map((d) => `<div><i data-css="height:${(callsOf(d) / maxCalls) * 70}px"></i>${esc(d.date.slice(8))}/${esc(d.date.slice(5, 7))}</div>`).join('')}</div></div>
     </div>
     <div class="card"><h2>Como a Ohara escolhe a IA</h2>
       <div class="seg" id="mode-seg">${Object.entries(MODE_INFO).map(([k, [l]]) => `<button data-mode="${k}" class="${k === mode ? 'active' : ''}">${l}</button>`).join('')}</div>
@@ -634,7 +663,9 @@ async function renderUsage() {
       <p class="muted small">Claude e Codex informam a cota de verdade. A do Gemini é estimada pelos pedidos do dia (limite em Ajustes). Os valores em US$ são só para comparar: as assinaturas não cobram por pedido.</p>
     </div>`;
   body.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', async () => {
-    state.config = await tryCall(guia.setConfig({ orchestration: { mode: b.dataset.mode } }));
+    const saved = await tryCall(guia.setConfig({ orchestration: { mode: b.dataset.mode } }));
+    if (!saved) return;
+    state.config = saved;
     renderUsage();
     previewRoute();
   }));
@@ -666,7 +697,7 @@ async function renderHealth() {
     </div>
     <div class="card"><h2>1. Programas básicos</h2>${base.map(row).join('')}</div>
     <div class="card"><h2>2. Suas IAs</h2>${ias.map(row).join('')}
-      <div class="hint" style="margin-top:10px">Ao clicar em <b>Instalar</b> ou <b>Fazer login</b>, abre uma janela preta (o terminal). Siga o que aparecer nela e,
+      <div class="hint" data-css="margin-top:10px">Ao clicar em <b>Instalar</b> ou <b>Fazer login</b>, abre uma janela preta (o terminal). Siga o que aparecer nela e,
       quando terminar, feche a janela e clique em <b>↻ Verificar de novo</b> aqui em cima.</div></div>
     <div class="card"><h2>3. Pronto?</h2>
       <p>${readyIas.length ? `IAs prontas: <b>${esc(readyIas.join(', '))}</b>.` : 'Nenhuma IA pronta ainda.'}</p>
@@ -678,13 +709,17 @@ async function renderHealth() {
   }));
   body.querySelectorAll('[data-url]').forEach((b) => b.addEventListener('click', () => guia.openExternal(b.dataset.url)));
   body.querySelector('#hn-save').addEventListener('click', async () => {
-    state.config = await tryCall(guia.setConfig({ userName: body.querySelector('#hn').value.trim() }));
+    const saved = await tryCall(guia.setConfig({ userName: body.querySelector('#hn').value.trim() }));
+    if (!saved) return;
+    state.config = saved;
     toast('Salvo.');
     greet();
   });
   body.querySelector('#start').addEventListener('click', async () => {
     const n = body.querySelector('#hn').value.trim();
-    state.config = await tryCall(guia.setConfig({ onboarded: true, ...(n ? { userName: n } : {}) }));
+    const saved = await tryCall(guia.setConfig({ onboarded: true, ...(n ? { userName: n } : {}) }));
+    if (!saved) return;
+    state.config = saved;
     greet();
     setView('chat');
   });
@@ -715,13 +750,13 @@ async function renderSettings() {
   body.innerHTML = `
     <div class="card"><h2>Você</h2>
       <div class="row"><label>Nome</label><input type="text" id="s-name" value="${esc(c.userName || '')}" /></div>
-      <div class="row" style="margin-top:8px"><label>Pasta dos projetos</label><input type="text" id="s-pdir" value="${esc(c.projectsDir)}" style="flex:1" /><button class="btn small" id="s-pick">Escolher…</button></div>
+      <div class="row" data-css="margin-top:8px"><label>Pasta dos projetos</label><input type="text" id="s-pdir" value="${esc(c.projectsDir)}" data-css="flex:1" /><button class="btn small" id="s-pick">Escolher…</button></div>
     </div>
     <div class="card"><h2>IAs</h2>
-      ${prov.map((p) => `<div class="row" style="padding:4px 0"><label><input type="checkbox" data-prov="${p.id}" ${p.enabled ? 'checked' : ''}/> ${esc(p.label)} <span class="muted small">${esc(p.vendor)}</span></label>
-        <span class="muted small" style="flex:1">${esc(p.help)}</span></div>`).join('')}
-      <div class="row" style="margin-top:8px"><label>Pedidos por dia no Gemini</label><input type="number" id="s-gem" min="10" step="10" value="${esc(c.providers?.gemini?.dailyRequests ?? 1000)}" style="width:110px" /><span class="muted small">limite usado para estimar a cota grátis</span></div>
-      <div class="row" style="margin-top:8px"><label>Modelo da IA local</label><input type="text" id="s-ollama" value="${esc(c.ollama?.model || '')}" style="width:180px" /><span class="muted small">ex.: qwen2.5:7b (leve) ou qwen2.5:14b (melhor, precisa de mais memória)</span></div>
+      ${prov.map((p) => `<div class="row" data-css="padding:4px 0"><label><input type="checkbox" data-prov="${p.id}" ${p.enabled ? 'checked' : ''}/> ${esc(p.label)} <span class="muted small">${esc(p.vendor)}</span></label>
+        <span class="muted small" data-css="flex:1">${esc(p.help)}</span></div>`).join('')}
+      <div class="row" data-css="margin-top:8px"><label>Pedidos por dia no Gemini</label><input type="number" id="s-gem" min="10" step="10" value="${esc(c.providers?.gemini?.dailyRequests ?? 1000)}" data-css="width:110px" /><span class="muted small">limite usado para estimar a cota grátis</span></div>
+      <div class="row" data-css="margin-top:8px"><label>Modelo da IA local</label><input type="text" id="s-ollama" value="${esc(c.ollama?.model || '')}" data-css="width:180px" /><span class="muted small">ex.: qwen2.5:7b (leve) ou qwen2.5:14b (melhor, precisa de mais memória)</span></div>
     </div>
     <div class="card"><h2>Segurança</h2>
       <label class="row"><input type="checkbox" id="s-cp" ${c.safety?.checkpoints !== false ? 'checked' : ''}/> Pontos de restauração (botão Desfazer) antes de cada pedido num projeto</label>
@@ -729,10 +764,10 @@ async function renderSettings() {
     </div>
     <div class="card"><h2>Aplicativo</h2>
       <label class="row"><input type="checkbox" id="s-login" ${login.enabled ? 'checked' : ''} ${login.available ? '' : 'disabled'}/> Iniciar com o Windows ${login.available ? '' : '<span class="muted small">(só no app instalado)</span>'}</label>
-      <div class="row" style="margin-top:8px"><button class="btn small" id="s-update">Verificar atualizações</button><span class="muted small" id="s-update-st"></span></div>
+      <div class="row" data-css="margin-top:8px"><button class="btn small" id="s-update">Verificar atualizações</button><span class="muted small" id="s-update-st"></span></div>
       <p class="muted small">Versão ${esc(info.version)} · dados em ${esc(info.dataDir)} · atalho para abrir: ${esc(c.hotkeys?.toggle || '')}</p>
     </div>
-    <div class="row" style="justify-content:flex-end"><button class="btn primary" id="s-save">Salvar ajustes</button></div>`;
+    <div class="row" data-css="justify-content:flex-end"><button class="btn primary" id="s-save">Salvar ajustes</button></div>`;
   body.querySelector('#s-pick').addEventListener('click', async () => {
     const d = await tryCall(guia.pickFolder());
     if (d) body.querySelector('#s-pdir').value = d;
@@ -746,13 +781,15 @@ async function renderSettings() {
     const providers = {};
     body.querySelectorAll('[data-prov]').forEach((cb) => { providers[cb.dataset.prov] = { enabled: cb.checked }; });
     providers.gemini = { ...providers.gemini, dailyRequests: Math.max(10, Number(body.querySelector('#s-gem').value) || 1000) };
-    state.config = await tryCall(guia.setConfig({
+    const saved = await tryCall(guia.setConfig({
       userName: body.querySelector('#s-name').value.trim(),
       projectsDir: body.querySelector('#s-pdir').value.trim() || c.projectsDir,
       providers,
       ollama: { model: body.querySelector('#s-ollama').value.trim() || c.ollama.model },
       safety: { checkpoints: body.querySelector('#s-cp').checked, explain: body.querySelector('#s-ex').checked },
     }));
+    if (!saved) return;
+    state.config = saved;
     toast('Ajustes salvos. Verificando as IAs de novo…');
     greet();
     syncProjectSelect();

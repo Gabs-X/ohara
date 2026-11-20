@@ -21,6 +21,7 @@ const { DocIndex } = require('../core/doc-index');
 const localTools = require('../core/local-tools');
 const localLlm = require('../core/local-llm');
 const { extractText } = require('../core/doc-text');
+const { isAppPage, sanitizeConfigPatch, assertSafeToOpen } = require('../core/ipc-guard');
 
 const APP_NAME = 'Ohara Guia';
 const ROOT = path.join(__dirname, '..', '..');
@@ -130,10 +131,10 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file:')) {
-      e.preventDefault();
-      if (/^https?:/.test(url)) shell.openExternal(url);
-    }
+    // Só a página da própria Guia; um arquivo arrastado para a janela abriria com o preload.
+    if (isAppPage(url, path.join(__dirname, 'renderer'))) return;
+    e.preventDefault();
+    if (/^https?:/.test(url)) shell.openExternal(url);
   });
   win.on('close', (e) => {
     if (!quitting) {
@@ -255,7 +256,7 @@ function registerIpc() {
 
   handle('app:info', () => ({ version: VERSION, dataDir, name: APP_NAME }));
   handle('config:get', () => config);
-  handle('config:set', (partial) => updateConfig(partial));
+  handle('config:set', (partial) => updateConfig(sanitizeConfigPatch(partial)));
 
   handle('health:get', () => health);
   handle('health:check', () => refreshHealth());
@@ -339,7 +340,7 @@ function registerIpc() {
   handle('tools:photo', (file) => localTools.readPhoto({ config, image: file }));
   handle('tools:anonymize', (text) => localTools.anonymize({ config, text, names: config.privacy?.names !== false, keep: [...(config.privacy?.keep || []), config.userName] }));
   handle('tools:log', (text) => localTools.diagnoseLog({ config, text }));
-  handle('shell:openPath', (p) => shell.openPath(p));
+  handle('shell:openPath', (p) => shell.openPath(assertSafeToOpen(p)));
   handle('clipboard:write', (text) => require('electron').clipboard.writeText(String(text || '')));
 
   handle('dialog:folder', async () => {

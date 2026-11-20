@@ -45,8 +45,9 @@ const el = {
   speak: $('#speak-replies'),
 };
 
-// encodeURI: nomes com espaço, # ou ? não quebram a URL da imagem.
-const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/, ''))}`;
+// Codifica cada pedaço do caminho: nomes com espaço, # ou ? não quebram a URL da imagem.
+const fileUrl = (p) => `file:///${String(p).replace(/\\/g, '/').replace(/^\/+/, '').split('/')
+  .map((seg, i) => (i === 0 && /^[a-z]:$/i.test(seg) ? seg : encodeURIComponent(seg))).join('/')}`;
 const fmtNum = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
 
 function providerTag(msg) {
