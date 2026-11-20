@@ -284,4 +284,4 @@ function learnPreferences(overrides, minVotes = 3) {
   return out;
 }
 
-module.exports = { route, codexOn, classify, learnPreferences, learnedLabel, CATEGORIES, normalize };
+module.exports = { route, codexOn, classify, findProject, learnPreferences, learnedLabel, CATEGORIES, normalize };

@@ -318,6 +318,26 @@ test('"pode seguir" depois de combinar uma tarefa: a Ohara-AI decide e abre o Or
   assert.equal(localCalls.length, 0);
 });
 
+test('"pode seguir" sem citar o projeto abre o Orca no projeto citado na tarefa resumida', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  verdict = { acao: 'claude', tarefa: 'Corrigir o envio de contexto da ohara para o Orca' };
+  await sendOrca(o, chat.id, 'pode seguir', 'pj1');
+  assert.equal(path.basename(orcaCalls[0].cwd).toLowerCase(), 'ohara');
+});
+
+test('projeto citado antes na conversa vale quando a tarefa vai para o Orca depois', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  o.get(chat.id).messages.push(
+    { role: 'user', text: 'tô pensando em mudar a tela de ajustes da ohara', at: Date.now() },
+    { role: 'assistant', text: 'Boa ideia, o que você quer mudar?', at: Date.now() },
+  );
+  verdict = { acao: 'conversar', tarefa: 'Mudar a tela de ajustes' };
+  await sendOrca(o, chat.id, 'encaminhe ao Claude', 'pj3');
+  assert.equal(path.basename(orcaCalls[0].cwd).toLowerCase(), 'ohara');
+});
+
 test('"era pra vc ter aberto um terminal no Orca" também conta como pedido explícito', async () => {
   const { o } = setup();
   const chat = o.create(WORK);

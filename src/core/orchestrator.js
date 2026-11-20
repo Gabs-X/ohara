@@ -2,7 +2,7 @@
 // mantém o contexto quando a conversa alterna entre Claude e Codex.
 const crypto = require('crypto');
 const fs = require('fs');
-const { route, classify, learnPreferences, normalize } = require('./router');
+const { route, classify, findProject, learnPreferences, normalize } = require('./router');
 const { chatLocal, decideLocal } = require('./local-chat');
 const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
@@ -221,6 +221,22 @@ class Orchestrator {
     return this.projCache.list;
   }
 
+  // Pedido que vai ao Orca sem citar o projeto ("pode seguir", "encaminhe ao Claude"): procura o projeto
+  // na tarefa resumida pela Ohara-AI, depois nas mensagens recentes dele, depois no último projeto aberto
+  // no Orca nesta conversa. Assim o Claude abre dentro do projeto, e não na pasta geral.
+  #projectFromChat(chat, handoff) {
+    const projects = this.#projects();
+    const inText = (t) => (t ? findProject(normalize(t), projects)?.path || null : null);
+    const fromTask = inText(handoff?.task);
+    if (fromTask) return fromTask;
+    const users = chat.messages.filter((m) => m.role === 'user' && m.text).slice(-6).reverse();
+    for (const m of users) {
+      const p = inText(m.text);
+      if (p) return p;
+    }
+    return chat.lastProject && fs.existsSync(chat.lastProject) ? chat.lastProject : null;
+  }
+
   // Categoria do último pedido roteado automaticamente nesta conversa.
   #previousCategory(chat) {
     for (let i = (chat?.messages.length || 0) - 1; i >= 0; i--) {
@@ -371,7 +387,11 @@ class Orchestrator {
       this.emit('chats:changed', {});
     }
 
-    const cwd = answered ? answered.pending.dir : improvement ? config.selfRepo : decision.project?.path || (chat.cwd !== config.defaultCwd ? chat.cwd : null);
+    const cwd = answered
+      ? answered.pending.dir
+      : improvement
+        ? config.selfRepo
+        : decision.project?.path || (decision.provider === 'orca' ? this.#projectFromChat(chat, handoff) : null) || (chat.cwd !== config.defaultCwd ? chat.cwd : null);
     const onEvent = (ev) => {
       if (ev.kind === 'tool') assistant.tools.push(ev.text);
       if (ev.kind === 'delta' && onDelta) onDelta(ev.text);
@@ -494,6 +514,7 @@ class Orchestrator {
     onEvent({ kind: 'tool', text: 'Orca: abrindo o projeto e o Claude' });
     const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account });
     (chat.orca ||= {})[key] = r.state;
+    if (dir !== general) chat.lastProject = dir;
     const where = r.branch ? `no projeto **${path.basename(r.root)}**, na branch \`${r.branch}\`` : `na pasta **${path.basename(r.root)}**`;
     const msg = r.reused
       ? `Mandei o pedido para o Claude que já está trabalhando ${where}, no Orca.`

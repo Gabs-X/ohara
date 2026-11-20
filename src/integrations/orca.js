@@ -149,6 +149,28 @@ async function labelConsole(bin, { terminal, worktree, root, request, account })
   return title;
 }
 
+// O Orca roda o agente com o prompt na linha de comando do shell do terminal: a primeira quebra de linha
+// encerra o comando (o Claude só recebia a 1ª linha, sem o pedido) e o cmd corta acima de ~8 mil caracteres.
+// Prompt com várias linhas ou longo vai para um arquivo, e o Claude recebe uma linha só apontando para ele.
+const INLINE_MAX = 1500;
+const PROMPT_TTL = 7 * 24 * 60 * 60_000;
+
+function singleLinePrompt(prompt, { dir = path.join(os.tmpdir(), 'ohara-orca'), now = Date.now() } = {}) {
+  const text = String(prompt || '').trim();
+  if (!/[\r\n]/.test(text) && text.length <= INLINE_MAX) return text;
+  fs.mkdirSync(dir, { recursive: true });
+  // Limpa tarefas antigas (só arrumação: se falhar, não atrapalha).
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      const p = path.join(dir, f);
+      if (now - fs.statSync(p).mtimeMs > PROMPT_TTL) fs.rmSync(p, { force: true });
+    }
+  } catch {}
+  const file = path.join(dir, `tarefa-${now}-${Math.random().toString(36).slice(2, 8)}.md`);
+  fs.writeFileSync(file, `${text}\n`, 'utf8');
+  return `A Ohara, assistente pessoal do Gabriel, mandou uma tarefa. O pedido completo, com o contexto e as regras, está no arquivo ${file} - leia esse arquivo inteiro antes de qualquer coisa e siga o que ele pede. Responda em português do Brasil.`;
+}
+
 function handleOf(result) {
   return result?.launch?.outcome?.handle || result?.agentTerminalHandle || result?.launch?.handle || null;
 }
@@ -168,6 +190,7 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
   const bin = orcaBin(config);
   const agent = config.orca?.agent || 'claude';
   const { started: startedOrca } = await ensureOrca(bin);
+  const line = singleLinePrompt(prompt);
 
   const top = await gitRoot(cwd);
   const root = top || cwd;
@@ -187,7 +210,7 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
   if (state && state.repoId === repo.id && state.terminal) {
     try {
       await orcaJson(bin, ['terminal', 'show', '--terminal', state.terminal]);
-      await orcaJson(bin, ['terminal', 'send', '--terminal', state.terminal, '--text', prompt, '--enter']);
+      await orcaJson(bin, ['terminal', 'send', '--terminal', state.terminal, '--text', line, '--enter']);
       return { state, branch: state.branch, worktree: state.worktree, reused: true, root, kind, startedOrca };
     } catch {
       // console fechado: segue e abre um novo na mesma worktree, se ela ainda existir
@@ -201,7 +224,7 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
   if (kind === 'git') {
     if (state?.repoId === repo.id && state.worktree) {
       try {
-        const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `id:${state.worktree}`, '--prompt', prompt, '--surface', 'terminal', '--focus']);
+        const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `id:${state.worktree}`, '--prompt', line, '--surface', 'terminal', '--focus']);
         const next = { ...state, account: acc, terminal: handleOf(res) };
         await labelConsole(bin, { terminal: next.terminal, worktree: state.worktree, root, request, account: acc });
         return { state: next, branch: state.branch, worktree: state.worktree, reused: true, root, kind, startedOrca };
@@ -210,7 +233,7 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
       }
     }
     const name = branchSlug(request);
-    const res = await orcaJson(bin, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--branch', name, '--agent', agent, '--prompt', prompt, '--surface', 'terminal', '--activate'], { timeout: 180_000 });
+    const res = await orcaJson(bin, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--branch', name, '--agent', agent, '--prompt', line, '--surface', 'terminal', '--activate'], { timeout: 180_000 });
     const wt = res.worktree || res;
     const next = { repoId: repo.id, account: acc, worktree: wt.id || null, branch: String(wt.branch || name).replace(/^refs\/heads\//, ''), terminal: handleOf(res) };
     await labelConsole(bin, { terminal: next.terminal, worktree: next.worktree, root, request, account: acc });
@@ -218,10 +241,10 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
   }
 
   // Pasta comum (sem git): abre o Claude na própria pasta.
-  const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `path:${root}`, '--prompt', prompt, '--surface', 'terminal', '--focus']);
+  const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `path:${root}`, '--prompt', line, '--surface', 'terminal', '--focus']);
   const next = { repoId: repo.id, account: acc, worktree: null, branch: null, terminal: handleOf(res) };
   await labelConsole(bin, { terminal: next.terminal, root, request, account: acc });
   return { state: next, branch: null, worktree: null, reused: false, root, kind, startedOrca };
 }
 
-module.exports = { sendToOrca, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };
+module.exports = { sendToOrca, singleLinePrompt, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };
