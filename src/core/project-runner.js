@@ -51,9 +51,15 @@ function detectProject(cwd) {
 async function runProject(cwd, { openFile } = {}) {
   const d = detectProject(cwd);
   if (d.kind === 'browser') {
-    await openFile(d.file);
+    // shell.openPath não rejeita: devolve a mensagem de erro (vazia quando abriu).
+    const err = await openFile(d.file);
+    if (err) throw new Error(`Não consegui abrir ${path.basename(d.file)}: ${err}`);
   } else if (d.kind === 'terminal') {
-    spawn('cmd.exe', ['/c', 'start', '"Projeto"', 'cmd.exe', '/k', d.command], { cwd, detached: true, stdio: 'ignore', windowsHide: false }).unref();
+    // Linha montada à mão: o Node escaparia as aspas com \" (que o cmd.exe não entende) e o título
+    // "Projeto" virava o programa a rodar. Entre aspas, o && do comando fica para a janela nova.
+    spawn('cmd.exe', ['/d', '/c', `start "Projeto" cmd.exe /k "${d.command}"`], {
+      cwd, detached: true, stdio: 'ignore', windowsHide: false, windowsVerbatimArguments: true,
+    }).on('error', () => {}).unref();
   }
   return d;
 }
