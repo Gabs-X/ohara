@@ -6,6 +6,7 @@ const path = require('path');
 const { runJsonl, shorten } = require('./providers/common');
 const { resolveCodex } = require('./providers/codex');
 const { claudeEnv, friendlyError } = require('./providers/claude');
+const { anonymize, deanonymize } = require('./local-tools');
 
 class DeferError extends Error {
   constructor(retryAt, reason) {
@@ -181,7 +182,22 @@ async function askOnce(o) {
     }
   }
   const run = choice.provider === 'codex' ? codexOnce : claudeOnce;
-  const result = await run({ ...o, model, effort });
+  // Privacidade: com a opção ligada, CPF, nomes, e-mails etc. viram marcadores antes de sair do PC
+  // e voltam ao normal na resposta. Quem detecta os nomes é o modelo local.
+  const priv = o.config.privacy || {};
+  let prompt = o.prompt;
+  let map = null;
+  if (priv.anonymizeCloud) {
+    const keep = [...(priv.keep || []), o.config.meetings?.selfName].filter(Boolean);
+    const a = await anonymize({ config: o.config, text: o.prompt, names: priv.names !== false, keep, signal: o.signal });
+    prompt = a.text;
+    map = a.map;
+  }
+  const result = await run({ ...o, prompt, model, effort });
+  if (map) {
+    result.data = deanonymize(result.data, map);
+    result.anonymized = Object.keys(map).length;
+  }
   o.usage.record(result.provider, result.model, result.tokens, o.feature);
   return result;
 }

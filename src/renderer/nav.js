@@ -1,7 +1,7 @@
-/* global central, el, renderMeetings, renderToday, renderAutomations, renderUsageView, renderSettings, toast */
+/* global central, el, renderMeetings, renderToday, renderAutomations, renderTools, renderUsageView, renderSettings, toast */
 // Navegação entre as telas.
 
-const VIEWS = ['today', 'chat', 'meetings', 'auto', 'usage', 'settings'];
+const VIEWS = ['today', 'chat', 'meetings', 'tools', 'auto', 'usage', 'settings'];
 let currentView = 'chat';
 
 function setView(view) {
@@ -12,7 +12,7 @@ function setView(view) {
   document.querySelector('.side-chat').hidden = view !== 'chat';
   document.querySelector('.side-meetings').hidden = view !== 'meetings';
   document.querySelector('.side-spacer').hidden = view === 'chat' || view === 'meetings';
-  const render = { today: renderToday, meetings: renderMeetings, auto: renderAutomations, usage: renderUsageView, settings: renderSettings }[view];
+  const render = { today: renderToday, meetings: renderMeetings, tools: renderTools, auto: renderAutomations, usage: renderUsageView, settings: renderSettings }[view];
   render?.();
   if (view === 'chat') el.input.focus();
   try {
