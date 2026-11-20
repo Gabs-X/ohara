@@ -80,7 +80,9 @@ async function refreshList() {
 
 async function openChat(id) {
   state.chatId = id;
-  state.chat = await central.getChat(id);
+  const chat = await central.getChat(id);
+  if (state.chatId !== id) return; // clicou em outra conversa enquanto esta carregava
+  state.chat = chat;
   renderMessages();
   relinkLives();
   syncCwdSelect();
@@ -89,13 +91,17 @@ async function openChat(id) {
   el.input.focus();
 }
 
-async function ensureChat() {
-  if (state.chatId) return state.chat;
-  const chat = await central.createChat(el.cwd.value || state.config.defaultCwd);
-  state.chatId = chat.id;
-  state.chat = chat;
-  refreshList();
-  return chat;
+// Uma só criação por vez: dois envios seguidos numa conversa nova não criam duas conversas.
+let creatingChat = null;
+function ensureChat() {
+  if (state.chatId) return Promise.resolve(state.chat);
+  creatingChat ||= central.createChat(el.cwd.value || state.config.defaultCwd).then((chat) => {
+    state.chatId = chat.id;
+    state.chat = chat;
+    refreshList();
+    return chat;
+  }).finally(() => { creatingChat = null; });
+  return creatingChat;
 }
 
 // ---------- Mensagens ----------
@@ -196,8 +202,20 @@ async function sendMessage() {
   const text = el.input.value.trim();
   if (!text) return;
 
-  const chat = await ensureChat();
-  const images = state.attachments.map((a) => a.path);
+  // Limpa o campo antes de esperar: um Enter duplo não manda o mesmo pedido duas vezes.
+  const attachments = state.attachments;
+  el.input.value = '';
+  state.attachments = [];
+  let chat;
+  try {
+    chat = await ensureChat();
+  } catch (err) {
+    if (!el.input.value) el.input.value = text;
+    state.attachments = attachments;
+    renderAttachments();
+    throw err;
+  }
+  const images = attachments.map((a) => a.path);
   const runId = crypto.randomUUID();
   const parallel = isBusy(chat.id);
   const userMsg = { role: 'user', text, images };

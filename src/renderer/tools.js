@@ -70,7 +70,7 @@ const PANELS = {
   docs(s) {
     const d = s.docs;
     const r = tl.results.docs;
-    const prog = tl.progress ? `<p class="muted small">Indexando ${tl.progress.done}/${tl.progress.total}: ${esc(tl.progress.file)}</p>` : '';
+    const prog = tl.progress ? `<p class="muted small" id="tl-progress">${esc(progressText(tl.progress))}</p>` : '';
     return `
       <section class="section">
         <div class="section-head"><h2>Pastas indexadas</h2>
@@ -337,7 +337,15 @@ async function renderTools() {
   });
 }
 
+function progressText(p) {
+  return `Indexando ${p.done}/${p.total}: ${p.file}`;
+}
 central.onDocsProgress((p) => {
   tl.progress = p;
-  if (!document.getElementById('view-tools')?.hidden) renderTools();
+  if (document.getElementById('view-tools')?.hidden) return;
+  // A cada arquivo só troca a linha do progresso: redesenhar a aba inteira tirava o foco
+  // de quem estava digitando e desfazia ajustes ainda não salvos.
+  const line = document.getElementById('tl-progress');
+  if (p && line) line.textContent = progressText(p);
+  else renderTools();
 });

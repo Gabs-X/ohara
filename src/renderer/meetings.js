@@ -44,7 +44,27 @@ const openTasks = () => mt.data.tasks.filter((t) => t.status !== 'done');
 central.onMeetings((data) => {
   mt.data = data;
   renderMeetingBadge();
-  if (!document.getElementById('view-meetings').hidden) renderMeetings();
+  if (document.getElementById('view-meetings').hidden) return;
+  // Atualização em segundo plano enquanto a pessoa digita (nova demanda, cartão em edição):
+  // redesenhar apagaria o texto. Espera ela sair do campo.
+  if (isEditingIn('mt-body')) {
+    mt.pendingRender = true;
+    return;
+  }
+  renderMeetings();
+});
+function isEditingIn(id) {
+  const box = document.getElementById(id);
+  const a = document.activeElement;
+  return !!(box && a && box.contains(a) && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+}
+document.addEventListener('focusout', () => {
+  // Depois que o foco saiu de fato (o próximo elemento já recebeu o foco).
+  setTimeout(() => {
+    if (!mt.pendingRender || isEditingIn('mt-body')) return;
+    mt.pendingRender = false;
+    if (!document.getElementById('view-meetings').hidden) renderMeetings();
+  }, 0);
 });
 
 function renderMeetingBadge() {
@@ -209,7 +229,7 @@ function cardHtml(t) {
   const next = t.status === 'todo' ? 'doing' : t.status === 'doing' ? 'done' : 'todo';
   const nextLabel = { doing: 'Iniciar demanda', done: 'Marcar como concluída', todo: 'Reabrir demanda' }[next];
   const origin = m
-    ? `<button class="origin" data-meeting="${m.key}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>`
+    ? `<button class="origin" data-meeting="${esc(m.key)}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>`
     : t.source === 'slack' && t.link
       ? `<button class="origin" data-link="${esc(t.link)}">↳ Slack</button>`
       : '';
@@ -237,7 +257,7 @@ function waitingHtml(w) {
   return `<div class="card waiting${w.forMe === false ? ' dim' : ''}" data-wid="${w.id}">
     <div class="card-text"><b>${esc(w.person)}</b>: ${esc(w.text)}</div>
     <div class="card-meta">${dl ? `<span class="due ${dl.cls}">📅 ${esc(dl.text)}</span>` : '<span>sem prazo</span>'}${w.lastNudgedAt ? `<span>cobrado ${relTime(w.lastNudgedAt)}</span>` : ''}</div>
-    ${m ? `<button class="origin" data-meeting="${m.key}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>` : ''}
+    ${m ? `<button class="origin" data-meeting="${esc(m.key)}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>` : ''}
     <div class="card-actions">
       <button data-wact="nudge" title="Preparar mensagem para revisar">Preparar cobrança</button>
       <button data-wact="done" class="task-primary">Marcar como recebido</button>

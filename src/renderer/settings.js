@@ -131,19 +131,23 @@ async function renderSettings() {
   </div>`;
 
   const $s = (sel) => body.querySelector(sel);
+  // Devolve true/false (não relança: os chamadores são listeners e o erro virava "Uncaught (in promise)").
   const save = async (partial, msg = 'Salvo.') => {
     try {
       await central.setConfig(partial);
       toast(msg);
+      return true;
     } catch (err) {
       toast(`Não salvei: ${String(err.message || err).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`, 'error');
-      throw err;
+      return false;
     }
   };
-  $s('#codex-on').addEventListener('change', (e) => callSafe(save({ codex: { enabled: e.target.checked } }, e.target.checked ? 'Codex ligado.' : 'Codex desligado: tudo vai para o Claude.')));
-  $s('#dev-save').addEventListener('click', () => callSafe((async () => {
-    await save({ codex: { developmentPermissions: $s('#dev-permissions').value, developmentPreflight: $s('#dev-preflight').checked } }, 'Permissões salvas para as próximas execuções.');
-  })()));
+  // Caixa de marcar: se não salvou, volta ao estado anterior para a tela não mentir.
+  const saveCheck = async (e, partial, msg) => {
+    if (!(await save(partial, msg))) e.target.checked = !e.target.checked;
+  };
+  $s('#codex-on').addEventListener('change', (e) => saveCheck(e, { codex: { enabled: e.target.checked } }, e.target.checked ? 'Codex ligado.' : 'Codex desligado: tudo vai para o Claude.'));
+  $s('#dev-save').addEventListener('click', () => save({ codex: { developmentPermissions: $s('#dev-permissions').value, developmentPreflight: $s('#dev-preflight').checked } }, 'Permissões salvas para as próximas execuções.'));
   $s('#dev-check').addEventListener('click', async () => {
     const button = $s('#dev-check');
     button.disabled = true;
@@ -160,15 +164,14 @@ async function renderSettings() {
     const v = $s('#cal-url').value.trim();
     if (v === '••••••') return;
     if (v && !/^https:\/\//.test(v)) return toast('O endereço precisa começar com https://', 'error');
-    await save({ integrations: { calendarIcsUrl: v } }, 'Agenda salva. Carregando eventos…');
-    setTimeout(renderSettings, 2500);
+    if (await save({ integrations: { calendarIcsUrl: v } }, 'Agenda salva. Carregando eventos…')) setTimeout(renderSettings, 2500);
   });
   $s('#cal-clear')?.addEventListener('click', async () => { await save({ integrations: { calendarIcsUrl: '' } }, 'Agenda removida.'); renderSettings(); });
 
   // GitHub
   const ghAccounts = () => $s('#gh-accounts').value.split(',').map((x) => x.trim()).filter(Boolean);
   $s('#gh-save').addEventListener('click', () => save({ integrations: { github: { enabled: $s('#gh-on').checked, accounts: ghAccounts() } } }));
-  $s('#gh-on').addEventListener('change', () => save({ integrations: { github: { enabled: $s('#gh-on').checked } } }));
+  $s('#gh-on').addEventListener('change', (e) => saveCheck(e, { integrations: { github: { enabled: e.target.checked } } }));
   $s('#gh-test').addEventListener('click', async () => {
     await central.setConfig({ integrations: { github: { accounts: ghAccounts() } } });
     $s('#gh-result').textContent = 'Consultando…';
@@ -195,8 +198,8 @@ async function renderSettings() {
   $s('#w-tts-test').addEventListener('click', () =>
     central.speak('Oi, Gabriel! Eu sou a Ohara. Abri o Spotify pra você e já deixei o resumo da reunião no painel de demandas.', $s('#w-tts').value),
   );
-  $s('#w-speak').addEventListener('change', (e) => {
-    save({ voice: { speakReplies: e.target.checked } });
+  $s('#w-speak').addEventListener('change', async (e) => {
+    await saveCheck(e, { voice: { speakReplies: e.target.checked } });
     const chk = document.getElementById('speak-replies');
     if (chk) chk.checked = e.target.checked;
   });

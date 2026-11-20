@@ -34,9 +34,11 @@ function reset() {
 central.onQuickOpen(async (p) => {
   st.config = await central.getConfig();
   if (p.mode === 'voiceTurn' || p.mode === 'voice') return;
-  if (st.busy && p.mode === 'ask' && !p.text) {
+  if (st.busy) {
+    // Mantém a resposta em andamento: reset() aqui apagava a resposta e descartava o resto dela.
+    if (p.mode !== 'ask' || p.text) q.meta.textContent = 'Espere a resposta atual terminar para fazer outro pedido.';
     q.input.focus();
-    return fit(); // mantém a resposta em andamento
+    return fit();
   }
   reset();
   q.input.value = '';
