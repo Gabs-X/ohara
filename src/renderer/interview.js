@@ -232,6 +232,15 @@ $('toggle').addEventListener('click', async () => {
 
 $('now').addEventListener('click', () => central.interviewAnswerNow());
 $('context').addEventListener('click', () => central.interviewOpenContext());
+$('new').addEventListener('click', async () => {
+  capture?.stop();
+  capture = null;
+  setRunning(false);
+  await central.interviewNew();
+  for (const node of cards.values()) node.remove();
+  cards.clear();
+  $('transcript').replaceChildren();
+});
 $('close').addEventListener('click', async () => {
   await stopAll();
   central.interviewHide();

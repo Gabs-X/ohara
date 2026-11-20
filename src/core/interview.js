@@ -65,6 +65,9 @@ function buildSystemPrompt(context) {
     '- Never invent employers, dates, numbers, certifications or experience that is not in the profile.',
     '  Respect the dates in the profile exactly (e.g. a degree that ended is finished, a job that ended is past).',
     '  If the profile has nothing about it, give an honest answer (eager to learn, related experience).',
+    '- "How would you / how do you approach" questions: describe a confident, senior approach with industry best practices',
+    '  (that is knowledge, not a claim), then tie it to one real example from the profile. Only claim as experience what is in the profile.',
+    '- Every bullet is something the candidate says out loud. Never put notes or instructions to him in the bullets.',
     '- Stay consistent with what you suggested earlier in this interview.',
     '- No markdown besides the "- " bullets. No intro, no closing remarks.',
     '',
@@ -74,8 +77,24 @@ function buildSystemPrompt(context) {
   ].join('\n');
 }
 
-function buildTurn({ history, latest, continuation = false }) {
+// Retomada (Parar → Começar, ou o Claude reabriu): o processo novo não lembra de nada, então a primeira
+// mensagem leva tudo o que já aconteceu na entrevista, para as respostas continuarem coerentes.
+function buildEarlier({ lines, cards }) {
+  if (!lines.length && !cards.length) return '';
+  const qa = cards.filter((c) => c.bullets?.length).map((c) => `Q: ${c.original}\nSuggested: ${c.bullets.join(' / ')}`);
   return [
+    '<earlier_in_this_interview>',
+    'Everything the interviewers said so far:',
+    ...lines.map((l) => `- ${l.text}`),
+    ...(qa.length ? ['', 'Talking points you already suggested (stay consistent with them):', ...qa] : []),
+    '</earlier_in_this_interview>',
+    '',
+  ].join('\n');
+}
+
+function buildTurn({ history, latest, continuation = false, earlier = '' }) {
+  return [
+    ...(earlier ? [earlier] : []),
     '<recent_transcript>',
     history.length ? history.join('\n') : '(start of interview)',
     '</recent_transcript>',
@@ -126,10 +145,12 @@ class ClaudeSession {
     this.current = null; // { onDelta, resolve, text }
     this.queue = [];
     this.stderr = '';
+    this.turns = 0; // mensagens já respondidas por este processo (0 = não lembra de nada)
   }
 
   start() {
     if (this.proc) return;
+    this.turns = 0;
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
       '--model', this.model, '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config',
       '--system-prompt', this.systemPrompt];
@@ -158,6 +179,7 @@ class ClaudeSession {
       cur.onDelta?.(cur.text);
     }
     if (ev.type === 'result') {
+      if (!ev.is_error) this.turns++;
       if (!cur.text && ev.result) cur.text = ev.result;
       this.#finish({ text: cur.text, error: ev.is_error ? friendlyError(ev.result || ev.subtype) : null });
     }
@@ -180,9 +202,12 @@ class ClaudeSession {
     if (!this.proc) this.start();
     this.current = this.queue.shift();
     this.current.text = '';
-    this.proc.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: this.current.message } })}\n`);
+    const m = this.current.message;
+    const content = typeof m === 'function' ? m(this.turns === 0) : m;
+    this.proc.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
   }
 
+  /** message pode ser uma função (fresh) => texto: decidida na hora do envio, quando já se sabe se o processo é novo. */
   ask(message, onDelta) {
     return new Promise((resolve) => {
       this.queue.push({ message, onDelta, resolve });
@@ -237,7 +262,7 @@ class InterviewService {
   }
 
   get settings() {
-    return { whisperModel: 'small', whisperBinDir: '', model: 'haiku', minWords: 4, historyLines: 14, mergeWindowMs: 3000, ...this.getConfig().interview };
+    return { whisperModel: 'small', whisperBinDir: '', model: 'haiku', minWords: 4, historyLines: 14, mergeWindowMs: 3000, resumeWithinMs: 3 * 60 * 60 * 1000, ...this.getConfig().interview };
   }
 
   ensureContext() {
@@ -274,14 +299,23 @@ class InterviewService {
     const s = this.settings;
     const st = this.whisper.status({ model: s.whisperModel });
     if (!st.installed) throw new Error(`Whisper ou o modelo "${s.whisperModel}" não está instalado (pasta whisper da Ohara).`);
-    this.reset();
-    this.active = true;
+    // Parou e voltou (ou fechou a janela) na mesma entrevista: continua com tudo o que já foi dito.
+    const resume = !!this.logFile && (this.lines.length || this.cards.length) && Date.now() - (this.lastActivity || 0) < s.resumeWithinMs;
+    if (resume) {
+      Object.assign(this, { queue: [], pending: '', pendingSince: 0, transcribing: false, analyzing: false, rerun: false, lastCard: null });
+      this.active = true;
+      this.#log(`_Retomada às ${new Date().toLocaleTimeString('pt-BR')}._`);
+    } else {
+      this.reset();
+      this.active = true;
+      const outDir = path.join(this.getConfig().outputDir || this.dir, 'Entrevistas');
+      fs.mkdirSync(outDir, { recursive: true });
+      const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
+      this.logFile = path.join(outDir, `entrevista-${stamp}.md`);
+      fs.writeFileSync(this.logFile, `# Entrevista · ${new Date().toLocaleString('pt-BR')}\n\n`, 'utf8');
+    }
+    this.lastActivity = Date.now();
     fs.mkdirSync(this.tmp, { recursive: true });
-    const outDir = path.join(this.getConfig().outputDir || this.dir, 'Entrevistas');
-    fs.mkdirSync(outDir, { recursive: true });
-    const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
-    this.logFile = path.join(outDir, `entrevista-${stamp}.md`);
-    fs.writeFileSync(this.logFile, `# Entrevista · ${new Date().toLocaleString('pt-BR')}\n\n`, 'utf8');
 
     this.#status('starting', 'Preparando o Claude e o Whisper…');
     const config = this.getConfig();
@@ -305,7 +339,17 @@ class InterviewService {
     return this.snapshot();
   }
 
+  /** Botão "Nova entrevista": esquece a anterior (a transcrição dela continua salva no .md). */
+  newInterview() {
+    this.stop();
+    this.reset();
+    this.lastActivity = 0;
+    this.#status('off', 'Pronto para uma nova entrevista');
+    return this.snapshot();
+  }
+
   stop() {
+    this.lastActivity = Date.now();
     this.active = false;
     this.queue.length = 0;
     this.server?.stop();
@@ -369,6 +413,7 @@ class InterviewService {
         if (text) {
           const line = { at: Date.now(), text };
           this.lines.push(line);
+          this.lastActivity = line.at;
           if (!this.pending) this.pendingSince = startedAt || line.at;
           this.pending = `${this.pending} ${text}`.trim();
           this.emit('interview:line', line);
@@ -431,9 +476,16 @@ class InterviewService {
     if (!continuation || prev.dismissed) this.emit('interview:card', card);
     this.#status('thinking', 'Pensando na resposta…');
 
-    const history = this.lines.slice(-s.historyLines).map((l) => l.text);
+    const recent = this.lines.slice(-s.historyLines);
+    const history = recent.map((l) => l.text);
+    // Processo novo (retomada ou o Claude reabriu): manda junto o que veio antes das falas recentes.
+    const earlierLines = this.lines.slice(0, this.lines.length - recent.length);
+    const message = (fresh) => buildTurn({
+      history, latest, continuation,
+      earlier: fresh ? buildEarlier({ lines: earlierLines, cards: this.cards.filter((c) => c.id !== card.id) }) : '',
+    });
     let dismissedEarly = false;
-    const r = await this.session.ask(buildTurn({ history, latest, continuation }), (text) => {
+    const r = await this.session.ask(message, (text) => {
       const p = parseAnswer(text);
       if (p.none && !dismissedEarly) {
         dismissedEarly = true;
@@ -469,4 +521,4 @@ class InterviewService {
   }
 }
 
-module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, buildSystemPrompt, buildTurn, parseAnswer, DEFAULT_CONTEXT };
+module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, buildSystemPrompt, buildTurn, buildEarlier, parseAnswer, DEFAULT_CONTEXT };

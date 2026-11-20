@@ -1008,6 +1008,7 @@ function registerIpc() {
   handle('interview:ask', (text) => interview.ask(String(text || '').slice(0, 2000)));
   handle('interview:openContext', () => shell.openPath(interview.ensureContext()));
   handle('interview:hide', () => interviewWin?.hide());
+  handle('interview:new', () => interview.newInterview());
   handle('quick:openInMain', (chatId) => {
     quick?.hide();
     showView('chat');

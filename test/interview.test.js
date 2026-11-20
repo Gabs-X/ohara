@@ -50,7 +50,7 @@ function fakeSession(replies, sent) {
     start() {},
     stop() {},
     ask: async (message, onDelta) => {
-      sent.push(message);
+      sent.push(typeof message === 'function' ? message(false) : message);
       const text = replies.shift() ?? 'NONE';
       onDelta?.(text);
       return { text, error: null };
@@ -162,6 +162,40 @@ test('fala curta sem pergunta nem chama a IA', async () => {
   svc.addAudio(new Uint8Array([1]), { turnEnd: true });
   await settle();
   assert.strictEqual(sent.length, 0);
+  svc.stop();
+});
+
+test('Parar → Começar continua a mesma entrevista e o Claude novo recebe tudo o que veio antes', async () => {
+  const { svc, sent } = fakeService(['Tell me about yourself please.', 'And why React?'], ['PT: Fale de você\n- Dev at Zema', 'PT: Por que React?\n- Typed UI']);
+  let sessions = 0;
+  const make = svc.createSession;
+  svc.createSession = (o) => {
+    sessions++;
+    const s = make(o);
+    let turns = 0;
+    const ask = s.ask;
+    // imita o processo real: só a primeira mensagem de cada processo é "fresh"
+    s.ask = (m, d) => ask(typeof m === 'function' ? m(turns++ === 0) : m, d);
+    return s;
+  };
+  await svc.start();
+  const log = svc.logFile;
+  svc.addAudio(new Uint8Array([1]), { turnEnd: true });
+  await settle();
+  svc.stop();
+  await svc.start(); // retomada
+  assert.strictEqual(svc.logFile, log);
+  assert.strictEqual(svc.cards.length, 1);
+  svc.addAudio(new Uint8Array([2]), { turnEnd: true, startedAt: Date.now() + 10_000 });
+  await settle();
+  assert.strictEqual(sessions, 2);
+  assert.doesNotMatch(sent[0], /earlier_in_this_interview/);
+  assert.match(sent[1], /<earlier_in_this_interview>[\s\S]*Q: Tell me about yourself please\.\nSuggested: Dev at Zema/);
+  assert.match(fs.readFileSync(log, 'utf8'), /_Retomada às/);
+  svc.newInterview();
+  assert.strictEqual(svc.lines.length, 0);
+  await svc.start();
+  assert.notStrictEqual(svc.cards.length, 1);
   svc.stop();
 });
 
