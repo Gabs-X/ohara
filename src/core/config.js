@@ -44,6 +44,31 @@ const DEFAULT_CONFIG = {
     developmentPreflight: true,
   },
 
+  // IA local via Ollama (grátis, offline, sem cota). Usada nas funções com provedor "Sempre local";
+  // se o Ollama não responder, a função cai para o Claude.
+  ollama: {
+    enabled: true,
+    url: 'http://127.0.0.1:11434',
+    model: 'qwen2.5:14b',
+    timeoutSec: 180,
+    contextTokens: 16384, // janela de contexto (o padrão do Ollama é pequeno para buscas em reuniões)
+  },
+
+  // Orca: o chat da Ohara roda no modelo local; o que exige o Claude (código, comandos, pesquisa)
+  // abre o Orca no projeto, com a branch da tarefa e o Claude já recebendo o contexto.
+  orca: {
+    bin: '', // vazio = %LOCALAPPDATA%\Programs\orca
+    agent: 'claude',
+    generalDir: 'C:/Users/gabri/Claude', // onde o Claude abre quando o pedido não cita um projeto
+    // Antes de abrir o Claude no Orca, a Ohara pergunta qual conta usar. "account" é o que o Orca aceita em
+    // `orca account select` (e-mail ou id; "system" = login padrão, ~/.claude). Vazio: imlaw = system;
+    // pessoal = e-mail do login em ~/.claude-pessoal. Cadastre a conta no Orca com `orca account add`.
+    accounts: {
+      imlaw: { label: 'Claude do escritório (ImLaw)', account: '' },
+      pessoal: { label: 'Claude pessoal', account: '' },
+    },
+  },
+
   // Limites de uso (0 a 1) que mudam o roteamento do chat.
   quota: {
     claudeDowngradeAt: 0.7, // acima disso, opus vira sonnet
@@ -62,11 +87,11 @@ const DEFAULT_CONFIG = {
   // model: rapido | equilibrado | profundo (ou um id); provider: auto | claude | codex
   features: {
     meetings: { background: true, model: 'equilibrado', effort: 'medium', provider: 'claude' }, // a análise de reunião é sempre no Claude
-    briefing: { background: true, model: 'rapido', effort: 'low', provider: 'auto' },
-    busca: { background: false, model: 'equilibrado', effort: 'medium', provider: 'auto' },
-    cobranca: { background: false, model: 'rapido', effort: 'low', provider: 'auto' },
-    slack: { background: true, model: 'rapido', effort: 'low', provider: 'auto' },
-    correcao: { background: false, model: 'rapido', effort: 'low', provider: 'auto' },
+    briefing: { background: true, model: 'rapido', effort: 'low', provider: 'ollama' },
+    busca: { background: false, model: 'equilibrado', effort: 'medium', provider: 'ollama' },
+    cobranca: { background: false, model: 'rapido', effort: 'low', provider: 'ollama' },
+    slack: { background: true, model: 'rapido', effort: 'low', provider: 'ollama' },
+    correcao: { background: false, model: 'rapido', effort: 'low', provider: 'ollama' },
   },
 
   // Roteador que aprende com as suas trocas manuais de modelo.

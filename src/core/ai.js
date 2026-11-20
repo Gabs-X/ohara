@@ -24,10 +24,11 @@ const util = (l) => (l ? Math.max(l.fiveHour ?? 0, l.weekly ?? 0) : 0);
  */
 function pickProvider(feature, limits, config) {
   const f = config.features?.[feature] || {};
+  if (f.provider === 'ollama' && config.ollama?.enabled !== false) return { provider: 'ollama' };
   // Codex desligado nos Ajustes: nem "Sempre Codex" nem a reserva por cota usam ele.
   const codexOn = config.codex?.enabled === true;
   if (f.provider === 'claude' || (f.provider === 'codex' && codexOn)) return { provider: f.provider };
-  if (f.provider === 'codex') return { provider: 'claude' };
+  if (f.provider === 'codex' || f.provider === 'ollama') return { provider: 'claude' };
 
   const background = !!f.background;
   const b = config.budgets;
@@ -129,9 +130,35 @@ async function codexOnce({ prompt, schema, effort, config, usage, signal }) {
   }
 }
 
+// IA local (Ollama). Sem custo e sem cota: não entra na contagem de uso.
+async function ollamaOnce({ prompt, schema, config, signal }) {
+  const o = config.ollama || {};
+  const timeout = AbortSignal.timeout((o.timeoutSec || 120) * 1000);
+  const body = { model: o.model, stream: false, messages: [{ role: 'user', content: prompt }] };
+  if (schema) body.format = schema;
+  if (o.contextTokens) body.options = { num_ctx: o.contextTokens };
+  let res;
+  try {
+    res = await fetch(`${o.url || 'http://127.0.0.1:11434'}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    });
+  } catch (e) {
+    throw new Error(`Ollama indisponível (${e.cause?.code || e.name})`);
+  }
+  if (!res.ok) throw new Error(`Ollama respondeu ${res.status}: ${shorten(await res.text(), 200)}`);
+  const j = await res.json();
+  const raw = j.message?.content || '';
+  const data = schema ? tryJson(raw) : raw.trim();
+  if (!data) throw new Error('Ollama devolveu resposta vazia ou fora do formato');
+  return { provider: 'ollama', model: o.model, data, tokens: { input: j.prompt_eval_count || 0, cached: 0, output: j.eval_count || 0, costUsd: 0 } };
+}
+
 /**
  * @param {object} o
- * @param {string} o.feature   chave em config.features (meetings, briefing, busca, cobranca, slack...)
+ * @param {string} o.feature  chave em config.features (meetings, briefing, busca, cobranca, slack...)
  * @param {string} o.prompt
  * @param {object} [o.schema]  JSON Schema estrito; sem schema devolve texto
  * @param {object} o.config
@@ -143,6 +170,16 @@ async function askOnce(o) {
   if (choice.defer) throw new DeferError(choice.defer, choice.reason);
   const model = o.config.claude.models[f.model] || f.model || o.config.claude.models.equilibrado;
   const effort = f.effort || 'medium';
+  if (choice.provider === 'ollama') {
+    try {
+      return await ollamaOnce({ ...o, model, effort });
+    } catch (e) {
+      if (o.signal?.aborted) throw e;
+      // Ollama fora do ar ou resposta ruim: cai para o Claude, sem travar a função.
+      const fallback = { ...f, provider: 'claude' };
+      return askOnce({ ...o, config: { ...o.config, features: { ...o.config.features, [o.feature]: fallback } } });
+    }
+  }
   const run = choice.provider === 'codex' ? codexOnce : claudeOnce;
   const result = await run({ ...o, model, effort });
   o.usage.record(result.provider, result.model, result.tokens, o.feature);

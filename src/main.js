@@ -913,7 +913,7 @@ function registerIpc() {
     return r.canceled ? [] : r.filePaths;
   });
   handle('screen:capture', () => captureScreen());
-  handle('voice:dictate', disabledFeature);
+  handle('voice:dictate', () => system.startVoiceTyping()); // sem Whisper: ditado do Windows (Win+H)
   handle('tts:speak', (text, voice) => speak(text, voice));
   handle('tts:stop', () => stopSpeaking());
   handle('tts:voices', () => NEURAL_VOICES);
@@ -970,8 +970,17 @@ function registerIpc() {
   handleSafe('whatsapp:confirm', disabledFeature);
   handleSafe('whatsapp:cancel', disabledFeature);
   handle('whisper:status', () => whisper.status());
-  handleSafe('whisper:install', disabledFeature);
-  handleSafe('whisper:transcribe', disabledFeature);
+  handleSafe('whisper:install', () => whisper.install((p) => send('whisper:progress', p)));
+  // Ditado: só transcreve o áudio e devolve o texto para o campo do chat. Nada é enviado nem executado.
+  handleSafe('whisper:transcribe', async (wavBytes) => {
+    const file = path.join(os.tmpdir(), `ohara-voz-${Date.now()}.wav`);
+    fs.writeFileSync(file, Buffer.from(wavBytes));
+    try {
+      return await whisper.transcribe(file, { prompt: 'Ohara' });
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
 
   // Janela rápida
   handle('quick:hide', () => quick?.hide());

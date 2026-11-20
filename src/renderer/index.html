@@ -129,16 +129,12 @@
         <div class="left">
           <button class="icon-btn" id="btn-screen" title="Anexar captura da tela">🖥️</button>
           <button class="icon-btn" id="btn-image" title="Anexar imagem">🖼️</button>
+          <button class="icon-btn" id="btn-voice" title="Ditar: fale e o texto aparece aqui para você revisar e enviar">🎤</button>
           <span id="route-badge" class="route-badge" hidden></span>
         </div>
         <div class="right">
-          <select id="model-select" title="Modelo">
+          <select id="model-select" title="O chat usa o modelo local; pedidos de código vão para o Claude no Orca" hidden>
             <option value="auto">Automático</option>
-            <option value="claude:rapido">Claude Haiku</option>
-            <option value="claude:equilibrado">Claude Sonnet</option>
-            <option value="claude:profundo">Claude Opus</option>
-            <option value="codex:medium">Codex</option>
-            <option value="codex:high">Codex (raciocínio alto)</option>
           </select>
           <button id="send" class="btn primary">Enviar</button>
         </div>
@@ -148,6 +144,7 @@
 
   <script src="markdown.js"></script>
   <script src="common.js"></script>
+  <script src="voice.js"></script>
 
   <script src="app.js"></script>
   <script src="meetings.js"></script>

@@ -50,7 +50,7 @@ const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/
 const fmtNum = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
 
 function providerTag(msg) {
-  const name = msg.provider === 'codex' ? 'Codex' : msg.provider === 'local' ? 'Ohara' : 'Claude';
+  const name = { codex: 'Codex', local: 'Ohara', ollama: 'Local', orca: 'Orca' }[msg.provider] || 'Claude';
   return `<span class="tag ${msg.provider}">${name} · ${escapeHtml(msg.model || '')}</span>`;
 }
 
@@ -317,7 +317,7 @@ function schedulePreview() {
     const text = el.input.value.trim();
     if (!text) { el.badge.hidden = true; return; }
     const r = await central.previewRoute(text, { hasImage: state.attachments.length > 0, override: el.model.value, chatId: state.chatId });
-    const name = r.provider === 'codex' ? 'Codex' : r.provider === 'local' ? 'Ohara' : 'Claude';
+    const name = { codex: 'Codex', local: 'Ohara', ollama: 'Local', orca: 'Orca' }[r.provider] || 'Claude';
     el.badge.innerHTML = `→ <b class="${r.provider}">${name} ${escapeHtml(r.model)}</b> · ${escapeHtml(r.label)}${r.reasons.length > 1 ? ` · ${escapeHtml(r.reasons.slice(1).join(' · '))}` : ''}`;
     el.badge.title = r.reasons.join('\n');
     el.badge.hidden = false;
@@ -356,6 +356,48 @@ $('#btn-image').addEventListener('click', async () => {
   files.forEach((p) => state.attachments.push({ path: p }));
   renderAttachments();
   schedulePreview();
+});
+
+// 🎤 Ditado: grava, o Whisper transcreve e o texto entra no campo para você revisar e enviar.
+// Nunca envia sozinho. Sem o Whisper instalado, abre o ditado do Windows (Win+H).
+let recording = null;
+$('#btn-voice').addEventListener('click', async () => {
+  const btn = $('#btn-voice');
+  if (recording) {
+    recording.stop();
+    return;
+  }
+  const ws = await central.whisperStatus();
+  if (!ws.installed) {
+    el.input.focus();
+    central.dictate();
+    return;
+  }
+  try {
+    recording = await Voice.record({ onLevel: (l) => (btn.style.boxShadow = `0 0 0 ${Math.round(l * 6)}px rgba(255,92,122,.5)`) });
+    btn.classList.add('rec');
+    btn.title = 'Gravando… clique para parar';
+    const bytes = await recording.done;
+    btn.classList.remove('rec');
+    btn.style.boxShadow = '';
+    btn.title = 'Ditar: fale e o texto aparece aqui para você revisar e enviar';
+    recording = null;
+    if (!bytes) return toast('Não ouvi nada.');
+    btn.textContent = '⏳';
+    const text = await Voice.transcribe(bytes);
+    btn.textContent = '🎤';
+    if (!text) return toast('Não consegui entender o áudio.');
+    el.input.value = (el.input.value ? `${el.input.value} ` : '') + text;
+    autosize();
+    schedulePreview();
+    el.input.focus();
+  } catch (err) {
+    recording = null;
+    btn.textContent = '🎤';
+    btn.classList.remove('rec');
+    btn.style.boxShadow = '';
+    toast(`Voz: ${err.message}`, 'error');
+  }
 });
 
 function alertInline(text) {

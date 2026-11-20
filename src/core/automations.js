@@ -250,7 +250,8 @@ class Automations {
     const byTs = new Map(msgs.map((m) => [m.ts, m]));
     let added = 0;
     for (const d of r.data.demandas || []) {
-      const src = byTs.get(d.ts);
+      // Modelo local às vezes devolve "[ts=123]" em vez de "123".
+      const src = byTs.get(String(d.ts || '').replace(/^\[?ts=/, '').replace(/\]$/, ''));
       this.meetings.addTask({
         text: d.descricao,
         deadline: /^\d{4}-\d{2}-\d{2}$/.test(d.prazo || '') ? d.prazo : null,

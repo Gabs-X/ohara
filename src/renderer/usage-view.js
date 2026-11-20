@@ -240,7 +240,7 @@ async function renderUsageView() {
   const slider = (path, label, value, help) => `<label class="slider"><span>${label} <b data-out="${path}">${pct(value)}%</b></span><input type="range" min="30" max="100" step="5" value="${pct(value)}" data-path="${path}"><small class="muted">${help}</small></label>`;
   const featModel = (k, f) => `<tr><td>${esc(FEATURE_LABEL[k] || k)}${f.background ? ' <span class="tag">segundo plano</span>' : ''}</td>
     <td><select data-feature="${k}" data-field="model">${[['rapido', 'Haiku'], ['equilibrado', 'Sonnet'], ['profundo', 'Opus']].map(([v, l]) => `<option value="${v}" ${f.model === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td>
-    <td><select data-feature="${k}" data-field="provider">${[['auto', 'Auto (pela cota)'], ['claude', 'Sempre Claude'], ...(codexOn ? [['codex', 'Sempre Codex']] : [])].map(([v, l]) => `<option value="${v}" ${f.provider === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td></tr>`;
+    <td><select data-feature="${k}" data-field="provider">${[['auto', 'Auto (pela cota)'], ['claude', 'Sempre Claude'], ['ollama', 'Sempre local (Ollama)'], ...(codexOn ? [['codex', 'Sempre Codex']] : [])].map(([v, l]) => `<option value="${v}" ${f.provider === v ? 'selected' : ''}>${l}</option>`).join('')}</select></td></tr>`;
 
   body.innerHTML = `
     <div class="tiles">

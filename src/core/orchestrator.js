@@ -2,9 +2,9 @@
 // mantém o contexto quando a conversa alterna entre Claude e Codex.
 const crypto = require('crypto');
 const fs = require('fs');
-const { route, classify, learnPreferences } = require('./router');
-const { runClaude } = require('./providers/claude');
-const { runCodex } = require('./providers/codex');
+const { route, classify, learnPreferences, normalize } = require('./router');
+const { chatLocal } = require('./local-chat');
+const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
@@ -49,6 +49,9 @@ const VOICE_FAST = new Set(['rapida', 'geral', 'escrita', 'sistema']);
 const PARALLEL_NOTE =
   'Outra tarefa desta mesma conversa ainda está rodando em paralelo. Faça só o que este pedido pede e evite mexer nos mesmos arquivos que a outra tarefa sem necessidade.';
 
+// Categorias que exigem ferramentas: só vão para o Claude (no Orca) quando o pedido é uma ação.
+const AGENT_CATEGORIES = new Set(['codigo', 'codigo_complexo', 'sistema', 'pesquisa']);
+const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[ae]\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
 const MAX_CONTEXT_CHARS = 9000;
 const DRAFT_STATUS = { pending: 'aguardando confirmação', sending: 'enviando', sent: 'enviada', error: 'falhou', cancelled: 'cancelada' };
 const DRAFT_TTL = 30 * 60_000; // "confirmado" vale para rascunhos de até 30 min atrás
@@ -92,6 +95,21 @@ function selfImprovePrompt(desc, request) {
     'No fim, diga em poucas frases o que mudou e pergunte se ele quer que você publique a versão nova (ela só passa a valer depois de instalada).',
   ].filter(Boolean).join('\n');
 }
+
+// Qual conta do Claude: "imlaw" (escritório) ou "pessoal". No pedido só vale se citar o Claude/conta;
+// na resposta à pergunta da Ohara (loose) basta citar a conta.
+function parseAccount(text, { loose = false } = {}) {
+  const t = normalize(text);
+  if (loose && t.split(/\s+/).length > 12) return null;
+  const im = loose ? /\b(imlaw|im law|escritorio|trabalho)\b/ : /\b(claude|conta|login)\s+(?:d[oa]s?\s+)?(imlaw|im law|escritorio|trabalho)\b/;
+  const pe = loose ? /\b(pessoal|minha conta|minha)\b/ : /\b(claude|conta|login)\s+(?:d[oa]s?\s+)?(pessoal|minha)\b/;
+  const a = im.test(t);
+  const b = pe.test(t);
+  return a === b ? null : a ? 'imlaw' : 'pessoal';
+}
+
+const ACCOUNT_QUESTION = (cfg) =>
+  `Antes de abrir o Orca: esse pedido é para o **${cfg?.imlaw?.label || 'Claude do escritório (ImLaw)'}** ou para o **${cfg?.pessoal?.label || 'Claude pessoal'}**? Responda "imlaw" ou "pessoal" que eu abro já com o pedido.`;
 
 function clip(text, max) {
   const s = String(text || '');
@@ -207,18 +225,26 @@ class Orchestrator {
     return null;
   }
 
-  #route(chat, text, { hasImage, override }) {
+  // O chat roda no modelo local. Só o que exige ferramentas (código, comandos, pesquisa, navegador)
+  // vai para o Claude, aberto no Orca. O roteador decide a categoria; aqui ela vira o destino.
+  #route(chat, text, { hasImage }) {
     const config = this.getConfig();
-    return route(text, {
+    const base = route(text, {
       browser: config.claude?.chrome !== false && needsBrowser(text),
       hasImage,
-      override,
+      override: 'auto',
       usage: this.usage.limits(),
       config,
-      learned: this.learned(),
+      learned: {},
       projects: this.#projects(),
       previous: this.#previousCategory(chat),
     });
+    const continued = (base.reasons || []).some((r) => /continua o assunto/.test(r)) && !!chat?.messages.some((m) => m.route?.provider === 'orca');
+    const toAgent = (AGENT_CATEGORIES.has(base.category) && (ACTION_RE.test(normalize(text)) || continued)) || (config.claude?.chrome !== false && needsBrowser(text));
+    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : 'conversa: modelo local'];
+    return toAgent
+      ? { ...base, provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined, reasons }
+      : { ...base, provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined, reasons };
   }
 
   preview(prompt, { hasImage, override, chatId }) {
@@ -265,12 +291,13 @@ class Orchestrator {
       if (reply) return reply;
     }
 
-    // Ela se ofereceu para se alterar e ele aceitou: implementa no próprio repositório, com o modelo mais forte.
+    // Ela se ofereceu para se alterar e ele aceitou: o Claude implementa no repositório da Ohara, pelo Orca.
     const improvement = this.#acceptedImprovement(chat, text);
-    if (improvement) override = 'claude:profundo';
+    // Ela perguntou qual conta do Claude usar e ele respondeu: segue com o pedido guardado.
+    const answered = this.#answeredAccount(chat, text);
 
     // "abre o Spotify", "pesquisa no Google X": resolve na hora, sem IA e sem gastar cota.
-    if (this.openExternal && !images.length && (!override || override === 'auto')) {
+    if (this.openExternal && !images.length && !answered && (!override || override === 'auto')) {
       const local = await this.#tryQuickAction(chat, text, clientRunId, source);
       if (local) return local;
     }
@@ -278,12 +305,14 @@ class Orchestrator {
     const parallel = this.isRunning(chatId);
 
     const decision = this.#route(chat, text, { hasImage: images.length > 0, override });
+    if (improvement || answered) Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
     if (source === 'voice' && decision.provider === 'claude' && VOICE_FAST.has(decision.category) && (!override || override === 'auto')) {
       Object.assign(decision, { tier: 'rapido', model: config.claude.models.rapido, effort: 'low' });
       decision.reasons = [...(decision.reasons || []), 'conversa por voz: modelo rápido'];
     }
     if (improvement) decision.reasons = [...(decision.reasons || []), 'melhoria aceita: a Ohara vai se alterar'];
-    if (source === 'chat' && !improvement) this.#remember(text, images.length > 0, override);
+    if (answered) decision.reasons = [...(decision.reasons || []), `conta escolhida: ${answered.account}`];
+    if (source === 'chat' && !improvement && !answered) this.#remember(text, images.length > 0, override);
 
     // Conversa nova na pasta padrão citando um projeto: já trabalha dentro dele.
     if (decision.project && !chat.messages.length && chat.cwd === config.defaultCwd) {
@@ -316,87 +345,38 @@ class Orchestrator {
 
     // Pasta da conversa apagada ou renomeada: o Windows recusaria abrir o agente nela
     // (e o erro aparece como "spawn claude ENOENT"). Volta para a pasta padrão.
-    if (!improvement && chat.cwd && !fs.existsSync(chat.cwd) && config.defaultCwd && fs.existsSync(config.defaultCwd)) {
+    if (!improvement && !answered && chat.cwd && !fs.existsSync(chat.cwd) && config.defaultCwd && fs.existsSync(config.defaultCwd)) {
       decision.reasons = [...(decision.reasons || []), `a pasta ${chat.cwd} não existe mais: usando ${config.defaultCwd}`];
       chat.cwd = config.defaultCwd;
       chat.sessions = {};
       this.emit('chats:changed', {});
     }
 
-    // Agente paralelo não reaproveita a sessão (ela está em uso): começa limpo, com o histórico.
-    // A automelhoria também roda à parte, porque trabalha em outra pasta (o repositório da Ohara).
-    const cwd = improvement ? config.selfRepo : chat.cwd;
-    const development = decision.provider === 'codex' && config.selfRepo && path.resolve(cwd).toLowerCase() === path.resolve(config.selfRepo).toLowerCase();
-    const isolated = parallel || !!improvement || development;
-    const sess = isolated ? null : chat.sessions[decision.provider];
-    const context = this.#handoff(chat, decision.provider, { upTo: userIndex, fresh: isolated });
-    const request = improvement ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}` : text;
-    const askWhatsApp = wantsWhatsApp(text) && !!(this.whatsapp || this.whatsappWeb);
+    const cwd = answered ? answered.pending.dir : improvement ? config.selfRepo : decision.project?.path || (chat.cwd !== config.defaultCwd ? chat.cwd : null);
     const onEvent = (ev) => {
-      if (ev.kind === 'limits') {
-        this.usage.updateClaudeLimits(ev.info);
-        this.emit('usage:update', this.usage.summary());
-        return;
-      }
       if (ev.kind === 'tool') assistant.tools.push(ev.text);
-      if (ev.kind === 'delta' && onDelta) onDelta(ev.text); // voz: começa a falar antes da resposta terminar
+      if (ev.kind === 'delta' && onDelta) onDelta(ev.text);
       this.emit('chat:event', { chatId, runId, ...ev });
-    };
-
-    const confirmContacts = !!config.integrations.whatsapp?.confirmContacts;
-    // Claude in Chrome: só no Claude (claude -p --chrome) e se não foi desligado em Ajustes.
-    const useChrome = decision.provider === 'claude' && config.claude?.chrome !== false;
-    // Antes de começar uma tarefa de navegador, confere se dá para usar o Chrome:
-    // ponte da extensão instalada e Chrome aberto (abre se estiver fechado).
-    let chromeIssue = null;
-    if (useChrome && this.ensureChrome && wantsBrowser(text)) {
-      const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
-      if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
-      if (!chrome?.running) chromeIssue = `não consegui abrir (${chrome?.error || 'erro desconhecido'})`;
-      else if (chrome.bridge === false) chromeIssue = chrome.error || 'a extensão Claude in Chrome não está registrada';
-      if (chromeIssue) onEvent({ kind: 'tool', text: `Chrome: ${chromeIssue}` });
-    }
-    const extra = [
-      source === 'voice' ? VOICE_NOTE : '',
-      parallel ? PARALLEL_NOTE : '',
-      config.integrations.whatsapp?.enabled === false ? 'O envio de WhatsApp e os comandos de voz foram desativados a pedido do Gabriel. Não envie mensagens, não use o navegador para contornar isso e não gere blocos [[whatsapp]]. Você pode redigir textos para ele copiar.' : '',
-      this.whatsappWeb ? CONTACTS_NOTE(confirmContacts) : '',
-      askWhatsApp ? WHATSAPP_NOTE : '',
-      useChrome ? chromeNote(findChrome()) : '',
-      chromeIssue ? chromeIssueNote(chromeIssue) : '',
-      decision.provider === 'codex' && needsBrowser(text) ? CODEX_BROWSER_NOTE : '',
-    ].filter(Boolean).join('\n');
-    const common = {
-      prompt: context + request,
-      cwd,
-      effort: decision.effort,
-      sessionId: sess?.id,
-      images,
-      config,
-      systemPrompt: systemPrompt(config, cwd) + (extra ? '\n' + extra : ''),
-      onEvent,
-      signal: ac.signal,
     };
 
     let result;
     try {
-      result =
-        decision.provider === 'codex'
-          ? await runCodex({ ...common, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
-          : await runClaude({ ...common, model: decision.model, permissionMode });
-
-      // Sessão expirada/inválida: tenta de novo do zero com o histórico transferido.
-      if (result.error && sess?.id && !ac.signal.aborted && !result.text) {
-        delete chat.sessions[decision.provider];
-        const retryCtx = this.#handoff(chat, decision.provider, { upTo: userIndex, fresh: true });
-        const retry = { ...common, prompt: retryCtx + request, sessionId: undefined };
-        result =
-          decision.provider === 'codex'
-            ? await runCodex({ ...retry, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
-            : await runClaude({ ...retry, model: decision.model, permissionMode });
+      if (decision.provider === 'orca') {
+        const request = answered ? answered.pending.request : improvement ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}` : text;
+        const account = answered?.account || parseAccount(text);
+        result = await this.#toOrca({ chat, config, text: answered ? answered.pending.text : text, request, cwd, userIndex, onEvent, assistant, account });
+      } else {
+        result = await chatLocal({
+          config,
+          history: chat.messages.slice(0, userIndex),
+          text,
+          project: cwd ? path.basename(cwd) : null,
+          signal: ac.signal,
+          onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+        });
       }
     } catch (err) {
-      result = { provider: decision.provider, model: decision.model, text: '', error: err.message, tokens: {} };
+      result = { provider: decision.provider, model: decision.model, text: '', error: ac.signal.aborted ? 'Cancelado.' : err.message, tokens: {} };
     } finally {
       this.running.delete(runId);
     }
@@ -412,13 +392,6 @@ class Orchestrator {
       assistant.ignored = true;
       assistant.text = '(ignorado: não parecia um pedido para a Ohara)';
     }
-    if ((askWhatsApp || hasDraft) && assistant.text && !assistant.error) {
-      try {
-        await this.#handleWhatsApp(assistant, { toSelf: askWhatsApp, chat, autoSend: !confirmContacts });
-      } catch (err) {
-        assistant.whatsapp = { sent: false, error: err.message };
-      }
-    }
     // Envio desligado, mas a IA ainda montou um bloco (ex.: por causa do histórico): mostra o texto para copiar.
     if (!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text)) {
       const { text: rest, drafts } = extractDrafts(assistant.text);
@@ -433,25 +406,80 @@ class Orchestrator {
       chat.pendingImprovement = { desc: offer[1], request: text, at: Date.now() };
     }
 
-    // Só o agente principal guarda a sessão; o que ele não viu entra como contexto na próxima vez.
-    if (result.sessionId && !isolated) {
-      chat.sessions[decision.provider] = { id: result.sessionId, syncedUpTo: chat.messages.indexOf(assistant) + 1 };
-    }
     chat.updatedAt = Date.now();
     this.chats.save();
 
     // Contabilidade de uso é secundária: uma falha aqui não pode impedir o "chat:done" (a tela ficaria presa em "rodando").
     try {
-      if (result.tokens && (result.tokens.input || result.tokens.output)) {
-        this.usage.record(decision.provider, assistant.model, result.tokens, source);
-      }
-      if (decision.provider === 'codex') this.usage.refreshCodexLimits();
+      // O modelo local e o Orca não consomem a cota do Claude/Codex.
       this.emit('usage:update', this.usage.summary());
     } catch (err) {
       console.error('Falha ao registrar o uso:', err);
     }
     this.emit('chat:done', { chatId, runId, message: assistant, source, running: this.isRunning(chatId) });
     return assistant;
+  }
+
+  // Abre o Orca no projeto, na branch da tarefa, com o Claude já recebendo o pedido e o contexto.
+  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null }) {
+    const general = config.orca?.generalDir || config.defaultCwd;
+    const dir = cwd && fs.existsSync(cwd) ? cwd : general;
+    const key = path.resolve(dir).toLowerCase();
+    const state = chat.orca?.[key] || null;
+    // Console novo: antes de abrir, pergunta qual Claude (escritório ou pessoal). Continuar no console aberto não pergunta.
+    if (!account && !state?.terminal && !state?.account) {
+      chat.pendingOrca = { text, request, dir, at: Date.now() };
+      return { provider: 'orca', model: 'Claude no Orca', text: ACCOUNT_QUESTION(config.orca?.accounts), tokens: {} };
+    }
+    const recent = chat.messages
+      .slice(0, userIndex)
+      .filter((m) => m.text)
+      .slice(-6)
+      .map((m) => `${m.role === 'user' ? 'Gabriel' : 'Ohara'}: ${clip(m.text, 700)}`)
+      .join('\n');
+    // Pedido de navegador: abre o Chrome antes (a extensão Claude in Chrome precisa dele aberto) e orienta o Claude.
+    let browserNote = '';
+    if (config.claude?.chrome !== false && wantsBrowser(text)) {
+      let issue = null;
+      if (this.ensureChrome) {
+        const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
+        if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
+        if (!chrome?.running) issue = `não consegui abrir (${chrome?.error || 'erro desconhecido'})`;
+        else if (chrome.bridge === false) issue = chrome.error || 'a extensão Claude in Chrome não está registrada';
+        if (issue) onEvent({ kind: 'tool', text: `Chrome: ${issue}` });
+      }
+      browserNote = [chromeNote(findChrome()), issue ? chromeIssueNote(issue) : ''].filter(Boolean).join('\n');
+    }
+    const parts = state && state.terminal
+      ? [request]
+      : [
+          'Você foi aberto pela Ohara, assistente pessoal do Gabriel, para fazer esta tarefa. Responda em português do Brasil.',
+          `Pasta do projeto: ${dir}${dir === general ? ` (nenhum projeto definido; os repositórios ficam em ${config.workspaceRoot})` : ''}.`,
+          'Regras: commits sem linha de coautoria; não dê push, não publique e não faça nada destrutivo sem pedir confirmação a ele; no fim, resuma em poucas frases o que foi feito.',
+          recent ? `\nConversa recente com a Ohara:\n${recent}` : '',
+          browserNote ? `\n${browserNote}` : '',
+          `\nPedido do Gabriel:\n${request}`,
+        ];
+    // Aspas duplas viram "^" no caminho até o Orca: troca por aspas tipográficas.
+    const prompt = parts.filter(Boolean).join('\n').replace(/"/g, '”');
+    onEvent({ kind: 'tool', text: 'Orca: abrindo o projeto e o Claude' });
+    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account });
+    (chat.orca ||= {})[key] = r.state;
+    const where = r.branch ? `no projeto **${path.basename(r.root)}**, na branch \`${r.branch}\`` : `na pasta **${path.basename(r.root)}**`;
+    const msg = r.reused
+      ? `Mandei o pedido para o Claude que já está trabalhando ${where}, no Orca.`
+      : `Abri o Orca ${where}, com o Claude já recebendo o pedido e o contexto da nossa conversa. Acompanhe e responda por lá.`;
+    assistant.orca = { branch: r.branch, root: r.root, reused: r.reused };
+    return { provider: 'orca', model: 'Claude no Orca', text: msg, tokens: {} };
+  }
+
+  // Resposta ("imlaw"/"pessoal") à pergunta de qual Claude abrir, até 30 min depois.
+  #answeredAccount(chat, text) {
+    const pending = chat.pendingOrca;
+    if (!pending) return null;
+    delete chat.pendingOrca; // vale só para a resposta seguinte
+    const account = parseAccount(text, { loose: true });
+    return account && Date.now() - pending.at < 30 * 60_000 ? { pending, account } : null;
   }
 
   // "sim"/"pode fazer" logo depois de ela oferecer uma melhoria (até 30 min depois).
