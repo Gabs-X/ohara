@@ -122,3 +122,20 @@ test('saúde: sem internet, só a IA local serve', async () => {
   });
   assert.deepEqual(r.available, ['ollama']);
 });
+
+test('desfazer funciona com nomes de arquivo com aspas, acentos e # e com fotos ao mesmo tempo', async () => {
+  const proj = tmp('ohara-proj-');
+  const cp = new Checkpoints({ dir: tmp('ohara-pontos-') });
+  const weird = "contrato 'final' #2 – revisão.txt";
+  fs.writeFileSync(path.join(proj, weird), 'original');
+  // Duas fotos disparadas juntas na mesma pasta não podem brigar pelo index.lock.
+  const [before] = await Promise.all([cp.snapshot(proj, 'antes'), cp.snapshot(proj, 'outra')]);
+  fs.writeFileSync(path.join(proj, weird), 'mudado');
+  fs.writeFileSync(path.join(proj, 'novo [x] & y.txt'), 'criado');
+  const after = await cp.snapshot(proj, 'depois');
+  const changes = await cp.changes(proj, before, after);
+  assert.deepEqual(changes.map((c) => c.file).sort(), [weird, 'novo [x] & y.txt'].sort());
+  await cp.undo(proj, before, after);
+  assert.equal(fs.readFileSync(path.join(proj, weird), 'utf8'), 'original');
+  assert.ok(!fs.existsSync(path.join(proj, 'novo [x] & y.txt')));
+});

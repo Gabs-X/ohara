@@ -322,7 +322,18 @@ class GuideAgent {
     if (!cp) throw new Error('Esta resposta não mexeu em arquivos.');
     if (cp.undone) throw new Error('Já foi desfeito.');
     if (this.running.size && [...this.running.values()].some((r) => r.chatId === chatId)) throw new Error('Espere a IA terminar antes de desfazer.');
-    const r = await this.checkpoints.undo(cp.cwd, cp.before, cp.after);
+    let r;
+    try {
+      r = await this.checkpoints.undo(cp.cwd, cp.before, cp.after);
+    } catch (err) {
+      if (!err.safety) throw err;
+      // Desfez só uma parte: guarda a foto de segurança para o "Refazer" voltar ao estado de antes.
+      cp.undone = Date.now();
+      cp.safety = err.safety;
+      this.chats.save();
+      this.emit('chat:message', { chatId, message: msg });
+      throw new Error(`Não consegui desfazer tudo (${err.message}). Feche o programa que está usando o arquivo e tente de novo, ou use "Refazer" para voltar ao estado de antes.`);
+    }
     cp.undone = Date.now();
     cp.safety = r.safety;
     delete chat.sessions[msg.provider]; // a IA não sabe que os arquivos voltaram: começa uma sessão nova

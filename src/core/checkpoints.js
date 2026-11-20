@@ -39,6 +39,19 @@ function tooBig(dir) {
 class Checkpoints {
   constructor({ dir }) {
     this.dir = dir;
+    this.locks = new Map();
+  }
+
+  // Uma operação por vez em cada repositório-sombra: dois pedidos na mesma pasta rodando
+  // "git add/commit" juntos davam "index.lock: File exists" e um deles ficava sem foto.
+  #serial(cwd, fn) {
+    const key = this.gitDir(cwd);
+    const prev = this.locks.get(key) || Promise.resolve();
+    const run = prev.catch(() => {}).then(fn);
+    const tail = run.catch(() => {});
+    this.locks.set(key, tail);
+    tail.then(() => { if (this.locks.get(key) === tail) this.locks.delete(key); });
+    return run;
   }
 
   /** Dá para fotografar esta pasta? (não pode ser a pasta pessoal, a raiz de um disco nem pasta enorme) */
@@ -75,7 +88,11 @@ class Checkpoints {
   }
 
   /** Tira uma foto da pasta. Devolve o id da foto. */
-  async snapshot(cwd, label = 'ponto de restauração') {
+  snapshot(cwd, label = 'ponto de restauração') {
+    return this.#serial(cwd, () => this.#snapshot(cwd, label));
+  }
+
+  async #snapshot(cwd, label) {
     await this.#ensure(cwd);
     await git(this.#args(cwd, ['add', '-A', '--ignore-errors', '.']), { cwd }).catch((e) => {
       if (!/warning|ignored/i.test(e.message)) throw e;
@@ -86,30 +103,38 @@ class Checkpoints {
 
   /** O que mudou entre duas fotos: [{ status: 'A'|'M'|'D', file }] */
   async changes(cwd, from, to) {
-    const out = await git(this.#args(cwd, ['diff', '--name-status', '--no-renames', from, to]), { cwd });
-    return out.split(/\r?\n/).filter(Boolean).map((l) => {
-      const [status, ...rest] = l.split('\t');
-      return { status: status[0], file: rest.join('\t') };
-    });
+    // -z: nomes com aspas, barra invertida ou acentos vêm crus, sem o escape do git.
+    const out = await git(this.#args(cwd, ['diff', '--name-status', '--no-renames', '-z', from, to]), { cwd });
+    const parts = out.split('\0');
+    const list = [];
+    for (let i = 0; i + 1 < parts.length; i += 2) if (parts[i]) list.push({ status: parts[i][0], file: parts[i + 1] });
+    return list;
   }
 
   /**
    * Desfaz o que mudou entre "from" e "to" (o antes e o depois de um pedido). Antes, tira uma foto do estado
    * atual, para o próprio desfazer também poder ser desfeito.
    */
-  async undo(cwd, from, to) {
+  undo(cwd, from, to) {
+    return this.#serial(cwd, () => this.#undo(cwd, from, to));
+  }
+
+  async #undo(cwd, from, to) {
     const changed = await this.changes(cwd, from, to);
-    const safety = await this.snapshot(cwd, 'antes de desfazer');
+    const safety = await this.#snapshot(cwd, 'antes de desfazer');
     const root = path.resolve(cwd);
-    const restore = [];
-    for (const { status, file } of changed) {
-      const full = path.resolve(root, file);
-      if (!full.toLowerCase().startsWith(root.toLowerCase() + path.sep)) continue; // nunca sai da pasta
-      if (status === 'A') fs.rmSync(full, { force: true });
-      else restore.push(file);
-    }
-    for (let i = 0; i < restore.length; i += 100) {
-      await git(this.#args(cwd, ['checkout', from, '--', ...restore.slice(i, i + 100)]), { cwd });
+    const inside = (file) => path.resolve(root, file).toLowerCase().startsWith(root.toLowerCase() + path.sep); // nunca sai da pasta
+    const restore = changed.filter((c) => c.status !== 'A' && inside(c.file)).map((c) => c.file);
+    try {
+      // Primeiro restaura (o passo que pode falhar com arquivo preso), depois apaga o que a IA criou.
+      for (let i = 0; i < restore.length; i += 100) {
+        await git(this.#args(cwd, ['checkout', from, '--', ...restore.slice(i, i + 100)]), { cwd });
+      }
+      for (const { status, file } of changed) if (status === 'A' && inside(file)) fs.rmSync(path.resolve(root, file), { force: true });
+    } catch (err) {
+      // Ficou pela metade: quem chamou recebe a foto de segurança para poder voltar ao estado de antes.
+      err.safety = safety;
+      throw err;
     }
     // Pastas que ficaram vazias depois de apagar arquivos criados pela IA.
     for (const { status, file } of changed) {

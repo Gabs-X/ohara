@@ -442,11 +442,18 @@ function stopSpeaking() {
   if (win && !win.isDestroyed()) win.webContents.send('tts:stop');
 }
 
-// Notificação do Windows; ao clicar, abre a tela certa.
+// Notificação do Windows; ao clicar, abre a tela certa. Fica guardada até fechar: sem referência,
+// o coletor de lixo pode descartar o objeto e o clique (minutos depois) não abre nada.
+const liveNotifications = new Set();
 function notify(title, body, view = null, chatId = null) {
   if (!Notification.isSupported()) return;
   const n = new Notification({ title, body, icon: ICON });
+  liveNotifications.add(n);
+  const forget = () => liveNotifications.delete(n);
+  n.on('close', forget);
+  setTimeout(forget, 30 * 60 * 1000).unref?.();
   n.on('click', () => {
+    forget();
     if (view === 'chat' && chatId) {
       showView('chat');
       send('chat:open', chatId);
