@@ -170,6 +170,7 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Abrir', click: () => { win.show(); win.focus(); } },
     { label: 'Verificar se está tudo certo', click: () => { win.show(); send('app:view', 'health'); } },
+    { label: 'O que a Ohara faz', click: () => { win.show(); send('app:view', 'help'); } },
     { type: 'separator' },
     { label: 'Iniciar com o Windows', type: 'checkbox', checked: app.getLoginItemSettings().openAtLogin, enabled: app.isPackaged, click: (i) => app.setLoginItemSettings({ openAtLogin: i.checked, args: ['--hidden'] }) },
     { label: 'Abrir pasta de dados', click: () => shell.openPath(dataDir) },

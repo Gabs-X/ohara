@@ -238,3 +238,10 @@ textarea.idea { width: 100%; min-height: 110px; resize: vertical; }
 .chat-item.selecting { cursor: pointer; }
 .chat-item .pick { margin: 0 6px 0 0; }
 .chat-item.picked { background: var(--panel-2); color: var(--text); }
+/* O que eu faço */
+.help-intro input { width: 100%; margin-top: 6px; }
+.help-index { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.help-index a { font-size: 12.5px; text-decoration: none; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; }
+.help-index a:hover { border-color: var(--accent); }
+.help-sec ul { margin: 6px 0 10px; padding-left: 20px; line-height: 1.6; }
+.help-sec p { margin: 0 0 4px; }

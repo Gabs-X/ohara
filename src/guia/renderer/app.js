@@ -1,4 +1,4 @@
-/* global guia, renderMarkdown, renderTools */
+/* global guia, renderMarkdown, renderTools, renderHelp */
 // Tela da Ohara Guia: conversas, planos, uso e economia, primeiros passos e ajustes.
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -77,7 +77,7 @@ const state = {
 };
 
 // ======================= Navegação =======================
-const VIEWS = ['chat', 'plans', 'tools', 'usage', 'health', 'settings'];
+const VIEWS = ['chat', 'plans', 'tools', 'usage', 'health', 'settings', 'help'];
 function setView(view) {
   if (!VIEWS.includes(view)) view = 'chat';
   state.view = view;
@@ -86,7 +86,8 @@ function setView(view) {
   $('.side-chat').hidden = view !== 'chat';
   $('.side-spacer').hidden = view === 'chat';
   const tools = typeof renderTools === 'function' ? renderTools : null; // vem de src/renderer/tools.js
-  ({ plans: renderPlans, tools, usage: renderUsage, health: renderHealth, settings: renderSettings }[view])?.();
+  const help = typeof renderHelp === 'function' ? () => renderHelp() : null; // vem de help.js
+  ({ plans: renderPlans, tools, usage: renderUsage, health: renderHealth, settings: renderSettings, help }[view])?.();
   if (view === 'chat') $('#input').focus();
 }
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
@@ -471,6 +472,7 @@ let previewTimer;
 $('#input').addEventListener('input', () => { autosize(); updateSend(); clearTimeout(previewTimer); previewTimer = setTimeout(previewRoute, 350); });
 document.querySelectorAll('.chip[data-s]').forEach((c) => c.addEventListener('click', () => { $('#input').value = c.dataset.s; autosize(); previewRoute(); $('#input').focus(); }));
 document.querySelector('.chip[data-plan]').addEventListener('click', () => { setView('plans'); newPlanForm(); });
+document.querySelector('.chip[data-help]').addEventListener('click', () => setView('help'));
 
 // Mostra para onde o pedido vai antes de enviar.
 async function previewRoute() {
@@ -824,7 +826,7 @@ async function renderHealth() {
     if (!saved) return;
     state.config = saved;
     greet();
-    setView('chat');
+    setView('help'); // primeira vez: mostra tudo o que ela faz
   });
 }
 // ---------- Ohara-AI: baixar o modelo local aqui dentro ----------

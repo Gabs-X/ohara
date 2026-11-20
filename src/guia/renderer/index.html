@@ -23,6 +23,7 @@
       <button class="tab" data-view="usage">📊<span>Uso e economia</span></button>
       <button class="tab" data-view="health">🩺<span>Primeiros passos</span><b id="health-badge" class="badge" hidden></b></button>
       <button class="tab" data-view="settings">⚙️<span>Ajustes</span></button>
+      <button class="tab" data-view="help">❓<span>O que eu faço</span></button>
     </nav>
     <div class="side-chat">
       <button id="new-chat" class="btn primary wide">+ Nova conversa</button>
@@ -58,6 +59,7 @@
           <button class="chip" data-s="Me ajuda a montar uma planilha para controlar as minhas despesas do mês">Planilha de despesas</button>
           <button class="chip" data-s="Organize os arquivos desta pasta em subpastas por tipo">Organizar uma pasta</button>
           <button class="chip" data-plan="1">🗺️ Planejar uma ideia</button>
+          <button class="chip" data-help="1">❓ Veja tudo o que eu faço</button>
         </div>
       </div>
     </section>
@@ -101,6 +103,11 @@
     <section class="body" id="health-body"></section>
   </main>
 
+  <main class="main" id="view-help" hidden>
+    <header class="topbar"><h1>O que eu faço</h1></header>
+    <section class="body" id="help-body"></section>
+  </main>
+
   <main class="main" id="view-settings" hidden>
     <header class="topbar"><h1>Ajustes</h1></header>
     <section class="body" id="settings-body"></section>
@@ -111,6 +118,7 @@
 
   <script src="../../renderer/markdown.js"></script>
   <script src="app.js"></script>
+  <script src="help.js"></script>
   <script src="../../renderer/tools.js"></script>
 </body>
 </html>
