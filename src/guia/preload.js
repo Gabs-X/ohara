@@ -8,6 +8,31 @@ const on = (channel) => (fn) => {
 };
 const inv = (channel) => (...args) => ipcRenderer.invoke(channel, ...args);
 
+// A tela de Ferramentas é a mesma da Ohara (src/renderer/tools.js) e fala com "central": aqui só o que ela usa.
+// Umas chamadas lá esperam o valor direto e outras o { ok, data, error }: raw() desembrulha as primeiras.
+const raw = (channel) => async (...args) => {
+  const r = await ipcRenderer.invoke(channel, ...args);
+  if (r?.ok === false) throw new Error(r.error);
+  return r?.data;
+};
+contextBridge.exposeInMainWorld('central', {
+  toolsStatus: raw('tools:status'),
+  pickFile: raw('dialog:file'),
+  pickFolder: raw('dialog:folder'),
+  setConfig: raw('config:set'),
+  openPath: raw('shell:openPath'),
+  copy: raw('clipboard:write'),
+  listRepos: async () => [],
+  docsIndex: inv('docs:index'),
+  docsAsk: inv('docs:ask'),
+  toolExtract: inv('tools:extract'),
+  toolTriage: inv('tools:triage'),
+  toolPhoto: inv('tools:photo'),
+  toolAnonymize: inv('tools:anonymize'),
+  toolLog: inv('tools:log'),
+  onDocsProgress: on('docs:progress'),
+});
+
 contextBridge.exposeInMainWorld('guia', {
   info: inv('app:info'),
   getConfig: inv('config:get'),

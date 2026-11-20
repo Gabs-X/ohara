@@ -17,6 +17,10 @@ const { detectProject, runProject } = require('../core/project-runner');
 const { computeSavings } = require('../core/savings');
 const { allSpecs, PROVIDERS, TIER_LABEL, routeLabel } = require('../core/providers/registry');
 const { MODES } = require('../core/multi-router');
+const { DocIndex } = require('../core/doc-index');
+const localTools = require('../core/local-tools');
+const localLlm = require('../core/local-llm');
+const { extractText } = require('../core/doc-text');
 
 const APP_NAME = 'Ohara Guia';
 const ROOT = path.join(__dirname, '..', '..');
@@ -56,7 +60,7 @@ function loadConfig() {
 let config = loadConfig();
 const getConfig = () => config;
 
-const ALLOWED_KEYS = new Set(['userName', 'onboarded', 'projectsDir', 'providers', 'orchestration', 'safety', 'ollama', 'hotkeys']);
+const ALLOWED_KEYS = new Set(['userName', 'onboarded', 'projectsDir', 'providers', 'orchestration', 'safety', 'ollama', 'hotkeys', 'documents', 'privacy']);
 function updateConfig(partial) {
   const clean = Object.fromEntries(Object.entries(partial || {}).filter(([k]) => ALLOWED_KEYS.has(k)));
   if (clean.orchestration?.mode && !MODES[clean.orchestration.mode]) throw new Error('Modo inválido.');
@@ -85,6 +89,7 @@ let quitting = false;
 const send = (channel, payload) => { if (win && !win.isDestroyed()) win.webContents.send(channel, payload); };
 
 const checkpoints = new Checkpoints({ dir: path.join(dataDir, 'pontos') });
+const docIndex = new DocIndex({ file: path.join(dataDir, 'documentos-indice.json'), getConfig, emit: (ch, p) => send(ch, p) });
 const agent = new GuideAgent({ chatsStore, usage, getConfig, getAvailable: () => new Set(health.available), emit: send, checkpoints });
 
 // O planejador usa o agente numa conversa própria do plano: o plano fica registrado e dá para conversar sobre ele.
@@ -302,6 +307,40 @@ function registerIpc() {
   });
 
   handle('usage:get', () => usageReport());
+
+  // Ferramentas locais (mesma tela da Ohara): tudo no modelo local, sem cota e sem o dado sair do PC.
+  handle('tools:status', async () => {
+    const models = await localLlm.installedModels(config);
+    const o = config.ollama || {};
+    const need = { texto: o.model, embeddings: o.embedModel || 'bge-m3', visao: o.visionModel || 'qwen2.5vl:7b' };
+    return {
+      ollama: models !== null,
+      missing: models ? Object.values(need).filter((m) => m && !localLlm.hasModel(models, m)) : [],
+      models: need,
+      docs: docIndex.status(),
+      privacy: config.privacy,
+      tabs: ['docs', 'extract', 'triage', 'photo', 'privacy', 'log'],
+      privacyScope: 'antes de cada pedido sair para Claude, Codex ou Gemini na conversa. Atenção: os arquivos que a IA abrir dentro do projeto não passam por isso.',
+      handoffLabel: 'Mandar para a IA resolver',
+      handoffPrefix: '',
+    };
+  });
+  handle('dialog:file', async (kind) => {
+    const filters = kind === 'image'
+      ? [{ name: 'Imagens', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+      : [{ name: 'Documentos', extensions: ['pdf', 'docx', 'txt', 'md', 'html', 'htm', 'rtf', 'csv', 'json', 'log'] }];
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  handle('docs:index', () => docIndex.rebuild());
+  handle('docs:ask', (q) => docIndex.ask(q));
+  handle('tools:extract', async ({ file, text } = {}) => localTools.extractFields({ config, text: file ? await extractText(file) : text }));
+  handle('tools:triage', (text) => localTools.triage({ config, text }));
+  handle('tools:photo', (file) => localTools.readPhoto({ config, image: file }));
+  handle('tools:anonymize', (text) => localTools.anonymize({ config, text, names: config.privacy?.names !== false, keep: [...(config.privacy?.keep || []), config.userName] }));
+  handle('tools:log', (text) => localTools.diagnoseLog({ config, text }));
+  handle('shell:openPath', (p) => shell.openPath(p));
+  handle('clipboard:write', (text) => require('electron').clipboard.writeText(String(text || '')));
 
   handle('dialog:folder', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'] });

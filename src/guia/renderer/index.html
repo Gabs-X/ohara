@@ -19,6 +19,7 @@
     <nav class="tabs" aria-label="Seções">
       <button class="tab" data-view="chat">💬<span>Conversas</span></button>
       <button class="tab" data-view="plans">🗺️<span>Planos</span></button>
+      <button class="tab" data-view="tools">🧰<span>Ferramentas</span></button>
       <button class="tab" data-view="usage">📊<span>Uso e economia</span></button>
       <button class="tab" data-view="health">🩺<span>Primeiros passos</span><b id="health-badge" class="badge" hidden></b></button>
       <button class="tab" data-view="settings">⚙️<span>Ajustes</span></button>
@@ -82,6 +83,11 @@
     </section>
   </main>
 
+  <main class="main" id="view-tools" hidden>
+    <header class="topbar"><h1>Ferramentas locais</h1><div class="top-actions"><span class="muted small">IA local · sem cota · nada sai do PC</span></div></header>
+    <section class="body" id="tools-body"></section>
+  </main>
+
   <main class="main" id="view-usage" hidden>
     <header class="topbar"><h1>Uso e economia</h1></header>
     <section class="body" id="usage-body"></section>
@@ -102,5 +108,6 @@
 
   <script src="../../renderer/markdown.js"></script>
   <script src="app.js"></script>
+  <script src="../../renderer/tools.js"></script>
 </body>
 </html>

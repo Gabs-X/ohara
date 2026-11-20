@@ -1,4 +1,4 @@
-/* global guia, renderMarkdown */
+/* global guia, renderMarkdown, renderTools */
 // Tela da Ohara Guia: conversas, planos, uso e economia, primeiros passos e ajustes.
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -7,6 +7,15 @@ const usd = (n) => `US$ ${(n || 0).toFixed(n < 1 ? 3 : 2).replace('.', ',')}`;
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
 const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/, ''))}`;
 const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || p;
+// Usados pela tela de Ferramentas (src/renderer/tools.js), que é a mesma da Ohara.
+function relTime(ts) {
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return 'agora';
+  if (diff < 3600) return `há ${Math.round(diff / 60)} min`;
+  if (diff < 86400) return `há ${Math.round(diff / 3600)} h`;
+  return new Date(ts).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+}
+const el = { input: document.querySelector('#input') };
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
 
 // Chamada ao processo principal: devolve os dados ou mostra o erro.
@@ -57,7 +66,7 @@ const state = {
 };
 
 // ======================= Navegação =======================
-const VIEWS = ['chat', 'plans', 'usage', 'health', 'settings'];
+const VIEWS = ['chat', 'plans', 'tools', 'usage', 'health', 'settings'];
 function setView(view) {
   if (!VIEWS.includes(view)) view = 'chat';
   state.view = view;
@@ -65,7 +74,8 @@ function setView(view) {
   for (const v of VIEWS) $(`#view-${v}`).hidden = v !== view;
   $('.side-chat').hidden = view !== 'chat';
   $('.side-spacer').hidden = view === 'chat';
-  ({ plans: renderPlans, usage: renderUsage, health: renderHealth, settings: renderSettings }[view])?.();
+  const tools = typeof renderTools === 'function' ? renderTools : null; // vem de src/renderer/tools.js
+  ({ plans: renderPlans, tools, usage: renderUsage, health: renderHealth, settings: renderSettings }[view])?.();
   if (view === 'chat') $('#input').focus();
 }
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => setView(t.dataset.view)));
@@ -248,6 +258,7 @@ function fillAssistant(wrap, m, live) {
       ${m.provider ? `<span class="tag ${providerClass(m.provider)}">${esc(m.model || m.provider)}</span>` : ''}
       <span class="why" title="${esc(reasons)}">${esc(m.route?.label || '')} · por quê?</span>
       ${tokens ? `<span>${tokens}</span>` : ''}
+      ${m.anonymized ? `<span title="CPF, nomes, e-mails etc. saíram do PC trocados por marcadores e voltaram na resposta">🕶️ ${m.anonymized} dado(s) protegidos</span>` : ''}
       ${!live && m.text ? '<button class="icon-btn" data-a="copy" title="Copiar a resposta">⧉</button>' : ''}
     </div>
     ${m.switched?.length ? `<div class="switched">↪ ${esc(m.switched.join(' · '))}</div>` : ''}

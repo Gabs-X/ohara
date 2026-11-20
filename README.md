@@ -170,6 +170,8 @@ npm run dist:guia    # gera dist-guia\Ohara-Guia-Setup-<versão>.exe e Ohara-Gui
 | Rede de segurança | Antes e depois de cada pedido num projeto, uma foto da pasta (`src/core/checkpoints.js`, num Git separado em `%APPDATA%\Ohara Guia\pontos`, sem tocar no projeto). "Desfazer" volta só os arquivos que a IA mexeu; "Refazer" traz de volta. As IAs são instruídas a não mexer fora da pasta e a pedir confirmação antes de ações difíceis de desfazer. |
 | Explicações | O fim de cada tarefa traz "O que eu fiz" e "Como conferir", sem jargão. "Por quê?" em cada resposta mostra o motivo da escolha da IA. |
 | Abrir meu projeto | Descobre como rodar a pasta (site estático no navegador; Node ou Python num terminal). |
+| Ferramentas locais | A mesma aba 🧰 da Ohara (documentos, extrair dados, triagem, documento por foto, privacidade e diagnóstico de erro), sem a aba de commit. |
+| Privacidade na conversa | Ligada em Ferramentas → Privacidade: antes de um pedido ir para Claude, Codex ou Gemini, CPF, CNPJ, nomes, e-mails etc. viram marcadores e voltam na resposta. Se a proteção falhar, nada é enviado. Cada pedido abre uma sessão nova com o contexto (os marcadores são renumerados). Os arquivos que a IA abre no projeto não passam por isso. |
 | Primeiros passos | Checagem de saúde: internet, Node, Git e cada IA (instalada? logada?), com botões "Instalar" e "Fazer login" que abrem o terminal com o comando certo. Repete a cada 10 minutos. |
 
 Atualização automática: os releases da Guia vão para `Gabs-X/ohara-guia` (configurado em `build/guia.builder.json`); o repositório precisa ser público para o app de outra pessoa conseguir baixar.

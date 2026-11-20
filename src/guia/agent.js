@@ -49,7 +49,7 @@ class GuideAgent {
    * @param {import('../core/checkpoints').Checkpoints} [o.checkpoints]
    * @param {(id:string, opts:object) => Promise<object>} [o.runProvider]
    */
-  constructor({ chatsStore, usage, getConfig, getAvailable, emit, checkpoints = null, runProvider = null }) {
+  constructor({ chatsStore, usage, getConfig, getAvailable, emit, checkpoints = null, runProvider = null, privacy = null }) {
     this.chats = chatsStore;
     this.usage = usage;
     this.getConfig = getConfig;
@@ -57,6 +57,7 @@ class GuideAgent {
     this.emit = emit;
     this.checkpoints = checkpoints;
     this.runProvider = runProvider || require('../core/providers/registry').runProvider;
+    this.privacy = privacy || require('../core/local-tools'); // { anonymize, deanonymize }
     this.running = new Map(); // runId -> { chatId, ac }
     if (!this.chats.data.chats) this.chats.data.chats = [];
     // Respostas que estavam rodando quando o app fechou.
@@ -137,8 +138,8 @@ class GuideAgent {
   }
 
   // Contexto que a IA ainda não viu (veio de outra IA ou de antes de trocar de pasta).
-  #handoff(chat, provider, upTo) {
-    const sess = chat.sessions[provider];
+  #handoff(chat, provider, upTo, fresh = false) {
+    const sess = fresh ? null : chat.sessions[provider];
     const unseen = chat.messages.slice(sess ? sess.syncedUpTo : 0, upTo).filter((m) => m.text && !m.error);
     if (!unseen.length) return '';
     const out = [];
@@ -218,12 +219,30 @@ class GuideAgent {
           onEvent({ kind: 'tool', text: `${failures.at(-1)}: tentando ${t.modelLabel || routeLabel(t.provider, t.tier, t.model)}` });
           this.emit('chat:route', { chatId, runId, route: { ...decision, ...t, reasons: [...decision.reasons, `trocou de IA: ${failures.join('; ')}`] } });
         }
-        const sess = chat.sessions[t.provider];
-        const context = this.#handoff(chat, t.provider, userIndex);
+        // Privacidade: o que vai para a nuvem sai com marcadores. Cada pedido abre uma sessão nova com o
+        // contexto inteiro, porque os marcadores ([PESSOA_1]...) são numerados de novo a cada pedido.
+        const protect = config.privacy?.anonymizeCloud && t.provider !== 'ollama';
+        const sess = protect ? null : chat.sessions[t.provider];
+        const context = this.#handoff(chat, t.provider, userIndex, protect);
+        let prompt = `${context}${text}`;
+        let map = null;
+        if (protect) {
+          try {
+            const a = await this.privacy.anonymize({ config, text: prompt, names: config.privacy.names !== false, keep: [...(config.privacy.keep || []), config.userName].filter(Boolean), signal: ac.signal });
+            prompt = a.text;
+            map = a.map;
+            if (a.count) onEvent({ kind: 'tool', text: `Privacidade: ${a.count} dado(s) pessoais trocados por marcadores antes de enviar` });
+          } catch (err) {
+            result = { provider: t.provider, model: t.model, text: '', error: `A privacidade está ligada, mas não consegui proteger o texto (${clip(err.message, 120)}). Nada foi enviado.`, tokens: {} };
+            break;
+          }
+        }
+        const unmask = (v) => (map ? this.privacy.deanonymize(v, map) : v);
         let partial = '';
         result = await this.runProvider(t.provider, {
-          prompt: `${context}${text}`,
-          systemPrompt: systemPrompt(config, chat.cwd, { explain: config.safety?.explain !== false }),
+          prompt,
+          systemPrompt: systemPrompt(config, chat.cwd, { explain: config.safety?.explain !== false })
+            + (map && Object.keys(map).length ? '\nO texto tem marcadores como [PESSOA_1] e [CPF_1] no lugar de dados pessoais: use-os exatamente assim, sem tentar adivinhar o que são.' : ''),
           history: chat.messages.slice(0, userIndex), // a IA local não tem sessão: recebe o histórico
           cwd: chat.cwd || config.defaultCwd,
           model: t.model === 'padrão' ? '' : t.model,
@@ -237,9 +256,13 @@ class GuideAgent {
           signal: ac.signal,
           onEvent: (ev) => {
             if (ev.kind === 'delta') partial += ev.text;
-            onEvent(ev);
+            onEvent(map && ev.text ? { ...ev, text: unmask(ev.text) } : ev);
           },
         }).catch((err) => ({ provider: t.provider, model: t.model, text: '', error: err.message, tokens: {} }));
+        if (map) {
+          result.text = unmask(result.text || '');
+          result.anonymized = Object.keys(map).length;
+        }
         if (!result.error || ac.signal.aborted) break;
         // Já respondeu parte (mexeu em arquivos?): não repete em outra IA, mostra o erro.
         if (partial.trim() || !RETRYABLE.test(result.error)) break;
@@ -258,6 +281,7 @@ class GuideAgent {
     assistant.error = ac.signal.aborted ? 'Cancelado.' : result.error || null;
     assistant.tokens = result.tokens || {};
     if (failures.length) assistant.switched = failures;
+    if (result.anonymized) assistant.anonymized = result.anonymized;
     if (result.sessionId && used.provider !== 'ollama') chat.sessions[used.provider] = { id: result.sessionId, syncedUpTo: chat.messages.length };
 
     try {

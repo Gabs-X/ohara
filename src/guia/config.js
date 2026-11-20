@@ -38,7 +38,16 @@ function guiaDefaults(home = os.homedir()) {
       model: 'qwen2.5:7b', // cabe em PCs comuns (~5 GB)
       timeoutSec: 180,
       contextTokens: 8192,
+      embedModel: 'bge-m3', // Ferramentas → Documentos (ollama pull bge-m3)
+      visionModel: 'qwen2.5vl:7b', // Ferramentas → Documento por foto (ollama pull qwen2.5vl:7b)
     },
+
+    // Ferramentas → Documentos: pastas indexadas para perguntar por significado (nada sai do PC).
+    documents: { folders: [] },
+
+    // Privacidade: antes de um pedido ir para Claude, Codex ou Gemini, CPF, CNPJ, nomes, e-mails etc. viram
+    // marcadores e voltam ao normal na resposta. Os nomes são achados pela IA local.
+    privacy: { anonymizeCloud: false, names: true, keep: [] },
 
     // IAs: enabled liga/desliga; tiers.<nível>.model troca o modelo; dailyRequests (Gemini) é a cota estimada do dia.
     providers: {},

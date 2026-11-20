@@ -3,6 +3,7 @@
 
 const tl = { tab: 'docs', status: null, repos: null, busy: false, progress: null, results: {} };
 
+// A edição Guia esconde a aba de commit (status.tabs lista as abas da edição).
 const TOOL_TABS = [
   ['docs', '📚', 'Documentos'],
   ['extract', '🧾', 'Extrair dados'],
@@ -137,11 +138,11 @@ const PANELS = {
     return `
       <section class="section settings">
         <h2>Proteger dados antes de mandar para a nuvem</h2>
-        <p class="muted small">Ligado, CPF, CNPJ, nº de processo, OAB, e-mail, telefone, CEP, nomes e endereços viram marcadores (<code>[PESSOA_1]</code>, <code>[CPF_1]</code>…) antes de ir para o Claude/Codex nas funções automáticas (reuniões, briefing, busca…). A resposta volta com os dados certos.</p>
+        <p class="muted small">Ligado, CPF, CNPJ, nº de processo, OAB, e-mail, telefone, CEP, nomes e endereços viram marcadores (<code>[PESSOA_1]</code>, <code>[CPF_1]</code>…) ${esc(s.privacyScope || 'antes de ir para o Claude/Codex nas funções automáticas (reuniões, briefing, busca…).')} A resposta volta com os dados certos.</p>
         <label class="check"><input type="checkbox" id="tl-pv-on" ${p.anonymizeCloud ? 'checked' : ''}/> Anonimizar o que vai para a nuvem</label>
         <label class="check"><input type="checkbox" id="tl-pv-names" ${p.names !== false ? 'checked' : ''}/> Trocar também nomes e endereços (achados pelo modelo local)</label>
         <label>Nomes que nunca devem ser trocados (separe por vírgula)<input id="tl-pv-keep" value="${esc((p.keep || []).join(', '))}" /></label>
-        <label class="check"><input type="checkbox" id="tl-pre" ${s.preSummary ? 'checked' : ''}/> Reunião longa: condensar no modelo local antes de mandar ao Claude (economiza cota)</label>
+        ${s.preSummary === undefined ? '' : `<label class="check"><input type="checkbox" id="tl-pre" ${s.preSummary ? 'checked' : ''}/> Reunião longa: condensar no modelo local antes de mandar ao Claude (economiza cota)</label>`}
         <div class="row"><button class="btn small-btn" id="tl-pv-save">Salvar</button></div>
       </section>
       <section class="section">
@@ -185,7 +186,7 @@ const PANELS = {
         <p><b>Causa provável:</b> ${esc(r.causa_provavel)}</p>
         ${r.solucao?.length ? `<ol>${r.solucao.map((x) => `<li>${esc(x)}</li>`).join('')}</ol>` : ''}
         <p class="${r.precisa_claude ? 'tl-warn' : 'tl-ok'} small">${r.precisa_claude ? '🤖 Vale chamar o Claude' : '✅ Dá para resolver sem o Claude'}: ${esc(r.motivo)}</p>
-        ${r.precisa_claude ? '<button class="btn primary small-btn" id="tl-lg-claude">Mandar pro Claude</button>' : ''}</section>` : ''}`;
+        ${r.precisa_claude ? `<button class="btn primary small-btn" id="tl-lg-claude">${esc(tl.status?.handoffLabel || 'Mandar pro Claude')}</button>` : ''}</section>` : ''}`;
   },
 };
 
@@ -210,7 +211,7 @@ async function renderTools() {
   const typed = Object.fromEntries(keepIds.map((id) => [id, document.getElementById(id)?.value]).filter(([, v]) => v != null));
 
   body.innerHTML = `${statusBar(s)}
-    <nav class="tl-tabs">${TOOL_TABS.map(([k, icon, name]) => `<button class="${tl.tab === k ? 'active' : ''}" data-tl-tab="${k}">${icon} ${name}</button>`).join('')}</nav>
+    <nav class="tl-tabs">${TOOL_TABS.filter(([k]) => !s.tabs || s.tabs.includes(k)).map(([k, icon, name]) => `<button class="${tl.tab === k ? 'active' : ''}" data-tl-tab="${k}">${icon} ${name}</button>`).join('')}</nav>
     ${PANELS[tl.tab](s)}`;
   for (const [id, v] of Object.entries(typed)) {
     const e = document.getElementById(id);
@@ -294,7 +295,7 @@ async function renderTools() {
         names: $t('#tl-pv-names').checked,
         keep: $t('#tl-pv-keep').value.split(',').map((x) => x.trim()).filter(Boolean),
       },
-      meetings: { localPreSummary: $t('#tl-pre').checked },
+      ...($t('#tl-pre') ? { meetings: { localPreSummary: $t('#tl-pre').checked } } : {}),
     });
     tl.status = null;
     toast('Salvo.');
@@ -330,7 +331,7 @@ async function renderTools() {
   $t('#tl-lg-claude')?.addEventListener('click', () => {
     const r = tl.results.log;
     setView('chat');
-    el.input.value = `manda pro Claude: investigar e corrigir este erro. Primeira análise local: ${r.resumo} (causa provável: ${r.causa_provavel}).\n\n\`\`\`\n${(tl.lastLog || '').slice(-6000)}\n\`\`\``;
+    el.input.value = `${tl.status?.handoffPrefix ?? 'manda pro Claude: '}investigar e corrigir este erro. Primeira análise local: ${r.resumo} (causa provável: ${r.causa_provavel}).\n\n\`\`\`\n${(tl.lastLog || '').slice(-6000)}\n\`\`\``;
     el.input.dispatchEvent(new Event('input'));
     el.input.focus();
   });

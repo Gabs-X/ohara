@@ -182,3 +182,43 @@ test('planejador: cria, marca etapa e revisa mantendo o que foi feito', async ()
   assert.match(asked[1].prompt, /\[feito\] Definir o conteúdo/);
   await assert.rejects(planner.create({ idea: '  ' }), /Descreva/);
 });
+
+// ---------- Privacidade ----------
+test('privacidade: a nuvem recebe marcadores, a resposta volta com os dados', async () => {
+  const { anonymize, deanonymize } = require('../src/core/local-tools');
+  let sent = null;
+  const { agent, config } = setup({
+    run: (id, o) => {
+      sent = o;
+      return { provider: id, model: o.model, text: 'Pronto: o contrato de [CPF_1] foi revisado.', sessionId: 'x', tokens: {} };
+    },
+  });
+  config.privacy = { anonymizeCloud: true, names: false, keep: [] };
+  agent.privacy = { anonymize: (o) => anonymize({ ...o, ai: { generate: async () => ({ data: { pessoas: [], enderecos: [] } }) } }), deanonymize };
+  const chat = agent.create(tmp('ohara-p-'));
+  const m = await agent.send(chat.id, { text: 'corrige o bug na função do contrato do CPF 123.456.789-09' });
+  assert.ok(!sent.prompt.includes('123.456.789-09'), 'o CPF não sai do PC');
+  assert.match(sent.prompt, /\[CPF_1\]/);
+  assert.equal(sent.sessionId, null, 'sessão nova a cada pedido');
+  assert.equal(m.text, 'Pronto: o contrato de 123.456.789-09 foi revisado.');
+  assert.equal(m.anonymized, 1);
+});
+
+test('privacidade: se não der para proteger, nada é enviado', async () => {
+  const { agent, calls, config } = setup();
+  config.privacy = { anonymizeCloud: true };
+  agent.privacy = { anonymize: async () => { throw new Error('Ollama fora'); }, deanonymize: (v) => v };
+  const chat = agent.create(tmp('ohara-p-'));
+  const m = await agent.send(chat.id, { text: 'corrige o bug na função de login' });
+  assert.equal(calls.length, 0);
+  assert.match(m.error, /Nada foi enviado/);
+});
+
+test('privacidade: a IA local não precisa de proteção', async () => {
+  const { agent, calls, config } = setup();
+  config.privacy = { anonymizeCloud: true };
+  agent.privacy = { anonymize: async () => { throw new Error('não devia chamar'); }, deanonymize: (v) => v };
+  const chat = agent.create(null);
+  await agent.send(chat.id, { text: 'oi, tudo bem?' });
+  assert.equal(calls[0].id, 'ollama');
+});

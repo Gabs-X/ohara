@@ -1,7 +1,9 @@
 {
   "appId": "com.gabsx.ohara-guia",
   "productName": "Ohara Guia",
-  "directories": { "output": "dist-guia" },
+  "directories": {
+    "output": "dist-guia"
+  },
   "files": [
     "package.json",
     "src/guia/**/*",
@@ -18,7 +20,12 @@
     "src/core/health.js",
     "src/core/project-runner.js",
     "src/core/development.js",
-    "src/core/desktop-probe.js"
+    "src/core/desktop-probe.js",
+    "src/renderer/tools.js",
+    "src/core/doc-index.js",
+    "src/core/doc-text.js",
+    "src/core/local-llm.js",
+    "src/core/local-tools.js"
   ],
   "extraMetadata": {
     "main": "src/guia/main.js",
@@ -26,7 +33,10 @@
     "productName": "Ohara Guia",
     "description": "Ohara Guia: assistente que orquestra várias IAs (Claude, Codex, Gemini e IA local) para quem não é desenvolvedor."
   },
-  "win": { "icon": "build/icon.ico", "signAndEditExecutable": false },
+  "win": {
+    "icon": "build/icon.ico",
+    "signAndEditExecutable": false
+  },
   "nsis": {
     "oneClick": false,
     "perMachine": false,
@@ -36,9 +46,16 @@
     "shortcutName": "Ohara Guia",
     "artifactName": "Ohara-Guia-Setup-${version}.${ext}"
   },
-  "portable": { "artifactName": "Ohara-Guia-Portatil-${version}.${ext}" },
+  "portable": {
+    "artifactName": "Ohara-Guia-Portatil-${version}.${ext}"
+  },
   "afterPack": "build/after-pack.js",
   "publish": [
-    { "provider": "github", "owner": "Gabs-X", "repo": "ohara-guia", "releaseType": "release" }
+    {
+      "provider": "github",
+      "owner": "Gabs-X",
+      "repo": "ohara-guia",
+      "releaseType": "release"
+    }
   ]
 }
