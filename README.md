@@ -152,6 +152,24 @@ Isso gera, na pasta `dist\`:
 O ícone é aplicado pelo `build/after-pack.js` (rcedit), porque a assinatura do electron-builder exige permissão de link simbólico no Windows.
 Os executáveis não são assinados, então o SmartScreen pode avisar na primeira execução: clique em "Mais informações" e depois em "Executar assim mesmo".
 
+## Ferramentas locais
+
+Aba **🧰 Ferramentas**. Tudo roda no modelo local (Ollama): não gasta cota e o dado não sai do PC. Diferente das funções automáticas, aqui não existe reserva no Claude: se o Ollama estiver fechado, a ferramenta avisa e para.
+
+| Ferramenta | O que faz | Modelo |
+|---|---|---|
+| Documentos | Indexa as pastas escolhidas (PDF com texto, .docx, txt, md, html) e responde perguntas por significado, citando o arquivo de cada trecho. Só relê o que mudou. | `bge-m3` + modelo de texto |
+| Extrair dados | Partes, CPF/CNPJ, valores, prazos, nº do processo e obrigações de contratos, acordos e petições. | modelo de texto |
+| Triagem | Classifica e-mails, mensagens e intimações por urgência, área, cliente e prazo (separe cada uma com `---`). | modelo de texto |
+| Documento por foto | Lê RG, CNH, comprovante ou página escaneada e devolve os campos. | `qwen2.5vl:7b` |
+| Privacidade | Liga a anonimização do que vai para o Claude/Codex nas funções automáticas: CPF, CNPJ, processo, OAB, e-mail, telefone, CEP, nomes e endereços viram marcadores e voltam na resposta. Também testa um texto. | modelo de texto |
+| Commit e PR | Escreve a mensagem de commit e a descrição do PR a partir do diff, no estilo dos commits anteriores. Não faz commit. | modelo de texto |
+| Diagnóstico de erro | Primeira olhada num log: causa provável, passos e se vale chamar o Claude (com botão que já leva o erro para o chat). | modelo de texto |
+
+Além disso, reunião com transcrição acima de `meetings.preSummaryMinChars` (40 mil caracteres) é condensada no modelo local antes de ir para o Claude (`meetings.localPreSummary`, ligado por padrão). Se o Ollama falhar, vai a transcrição inteira.
+
+Modelos a baixar uma vez: `ollama pull bge-m3` e `ollama pull qwen2.5vl:7b` (a tela avisa o que falta). Configuração em `ollama.embedModel`, `ollama.visionModel`, `documents.folders` e `privacy`. O índice fica em `%APPDATA%\Ohara\documentos-indice.json`.
+
 ## Modo entrevista
 
 Para entrevistas em inglês no Teams (ou qualquer app de chamada). Abra com **Ctrl+Alt+E** ou pela bandeja → **Modo entrevista** e clique em **Começar a ouvir**.

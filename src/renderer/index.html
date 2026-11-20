@@ -21,6 +21,7 @@
       <button class="tab" data-view="today">☀️<span>Hoje</span><b id="badge-today" class="badge" hidden></b></button>
       <button class="tab active" data-view="chat">💬<span>Conversas</span></button>
       <button class="tab" data-view="meetings">📋<span>Demandas e reuniões</span><b id="tab-badge" class="badge" hidden></b></button>
+      <button class="tab" data-view="tools">🧰<span>Ferramentas</span></button>
       <button class="tab" data-view="auto">⚡<span>Automações</span></button>
       <button class="tab" data-view="usage">📊<span>Uso</span></button>
       <button class="tab" data-view="settings">⚙️<span>Ajustes</span></button>
@@ -74,6 +75,11 @@
       <button class="btn primary small-btn">Perguntar à IA</button>
     </form>
     <section class="mt-body" id="mt-body"></section>
+  </main>
+
+  <main class="main" id="view-tools" hidden>
+    <header class="topbar"><h1>Ferramentas locais</h1><div class="top-actions"><span class="muted small">Modelo local · sem cota · nada sai do PC</span></div></header>
+    <section class="mt-body" id="tools-body"></section>
   </main>
 
   <main class="main" id="view-auto" hidden>
@@ -154,6 +160,7 @@
   <script src="meetings.js"></script>
   <script src="today.js"></script>
   <script src="automations.js"></script>
+  <script src="tools.js"></script>
   <script src="usage-view.js"></script>
   <script src="settings.js"></script>
   <script src="nav.js"></script>

@@ -52,6 +52,21 @@ const DEFAULT_CONFIG = {
     model: 'qwen2.5:14b',
     timeoutSec: 180,
     contextTokens: 16384, // janela de contexto (o padrão do Ollama é pequeno para buscas em reuniões)
+    embedModel: 'bge-m3', // busca por significado nos documentos (ollama pull bge-m3)
+    visionModel: 'qwen2.5vl:7b', // leitura de documento por foto (ollama pull qwen2.5vl:7b)
+  },
+
+  // Ferramentas locais → Documentos: pastas indexadas para a busca por significado (nada sai do PC).
+  documents: {
+    folders: [],
+  },
+
+  // Privacidade: antes de mandar texto para o Claude/Codex, troca CPF, CNPJ, nomes, e-mails etc. por
+  // marcadores e desfaz na resposta. Os nomes são achados pelo modelo local.
+  privacy: {
+    anonymizeCloud: false,
+    names: true, // false: só os padrões fixos (CPF, CNPJ, e-mail, telefone, CEP, OAB, nº de processo)
+    keep: [], // nomes que nunca são trocados (o seu já entra sozinho)
   },
 
   // Orca: o chat da Ohara roda no modelo local; o que exige o Claude (código, comandos, pesquisa)
@@ -112,6 +127,9 @@ const DEFAULT_CONFIG = {
     autoAnalyze: false,
     ignoreBefore: null, // "AAAA-MM-DD": não processa reuniões anteriores
     prepMinutes: 5, // aviso com a pauta antes de reuniões recorrentes
+    // Reunião longa: o modelo local condensa a transcrição antes e só o resumo vai para o Claude.
+    localPreSummary: true,
+    preSummaryMinChars: 40000, // abaixo disso vai a transcrição inteira
   },
 
   integrations: {

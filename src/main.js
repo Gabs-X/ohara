@@ -28,6 +28,10 @@ const { matchWake, isEndPhrase, isMicOff } = require('./core/wake');
 const textFix = require('./core/text-fix');
 const { askOnce } = require('./core/ai');
 const { InterviewService } = require('./core/interview');
+const { DocIndex } = require('./core/doc-index');
+const localTools = require('./core/local-tools');
+const localLlm = require('./core/local-llm');
+const { extractText } = require('./core/doc-text');
 
 // Desenvolvimento: CENTRAL_DATA_DIR usa outra pasta de dados (e permite rodar ao lado do app instalado).
 if (process.env.CENTRAL_DATA_DIR) app.setPath('userData', process.env.CENTRAL_DATA_DIR);
@@ -462,6 +466,7 @@ const whisper = new Whisper({ dir: path.join(dataDir, 'whisper'), getConfig });
 const interview = new InterviewService({ whisper, getConfig, emit: send, dataDir, usage });
 const neuralTts = new NeuralTTS({ dir: path.join(os.tmpdir(), 'ohara-fala') });
 const insights = new Insights({ meetings, store: insightsStore, usage, getConfig, emit: send, notify, calendar });
+const docIndex = new DocIndex({ file: path.join(dataDir, 'documentos-indice.json'), getConfig, emit: send });
 let trayRebuild = () => {};
 const automations = new Automations({
   store: autoStore, orchestrator, insights, meetings, slack, usage, getConfig, notify,
@@ -951,6 +956,38 @@ function registerIpc() {
   handle('insights:markdown', (key) => insights.markdown(key));
   handleSafe('insights:saveMarkdown', (key) => insights.saveMarkdown(key));
   handle('insights:mailto', (key) => shell.openExternal(insights.mailto(key)));
+
+  // Ferramentas locais: tudo no modelo local (Ollama), sem cota e sem o dado sair do PC.
+  handle('tools:status', async () => {
+    const models = await localLlm.installedModels(config);
+    const o = config.ollama || {};
+    const need = { texto: o.model, embeddings: o.embedModel || 'bge-m3', visao: o.visionModel || 'qwen2.5vl:7b' };
+    return {
+      ollama: models !== null,
+      missing: models ? Object.values(need).filter((m) => m && !localLlm.hasModel(models, m)) : [],
+      models: need,
+      docs: docIndex.status(),
+      privacy: config.privacy,
+      preSummary: config.meetings?.localPreSummary !== false,
+    };
+  });
+  handle('dialog:file', async (kind) => {
+    const filters = kind === 'image'
+      ? [{ name: 'Imagens', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+      : [{ name: 'Documentos', extensions: ['pdf', 'docx', 'txt', 'md', 'html', 'htm', 'rtf', 'csv', 'json', 'log'] }];
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  handleSafe('docs:index', () => docIndex.rebuild());
+  handleSafe('docs:ask', (q) => docIndex.ask(q));
+  handleSafe('tools:extract', async ({ file, text } = {}) => localTools.extractFields({ config, text: file ? await extractText(file) : text }));
+  handleSafe('tools:triage', (text) => localTools.triage({ config, text }));
+  handleSafe('tools:photo', (file) => localTools.readPhoto({ config, image: file }));
+  handleSafe('tools:anonymize', (text) => localTools.anonymize({
+    config, text, names: config.privacy?.names !== false, keep: [...(config.privacy?.keep || []), config.meetings?.selfName],
+  }));
+  handleSafe('tools:commit', (repo) => localTools.commitMessage({ config, repo }));
+  handleSafe('tools:log', (text) => localTools.diagnoseLog({ config, text }));
 
   // Automações
   handle('auto:get', () => automations.snapshot());

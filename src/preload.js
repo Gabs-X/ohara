@@ -80,6 +80,19 @@ contextBridge.exposeInMainWorld('central', {
   saveMeetingMarkdown: inv('insights:saveMarkdown'),
   mailMeeting: inv('insights:mailto'),
 
+  // Ferramentas locais (modelo local)
+  toolsStatus: inv('tools:status'),
+  pickFile: inv('dialog:file'),
+  docsIndex: inv('docs:index'),
+  docsAsk: inv('docs:ask'),
+  onDocsProgress: on('docs:progress'),
+  toolExtract: inv('tools:extract'),
+  toolTriage: inv('tools:triage'),
+  toolPhoto: inv('tools:photo'),
+  toolAnonymize: inv('tools:anonymize'),
+  toolCommit: inv('tools:commit'),
+  toolLog: inv('tools:log'),
+
   // Automações
   getAutomations: inv('auto:get'),
   saveRoutine: inv('auto:saveRoutine'),

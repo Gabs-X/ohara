@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { loadMeeting, meetingKeyFromFile } = require('./transcript');
 const { shorten } = require('./providers/common');
 const { askOnce } = require('./ai');
+const { preSummarize } = require('./local-tools');
 
 // Schema "estrito" (tudo obrigatório, null quando não houver) para funcionar no Claude e no Codex.
 const nullableString = { type: ['string', 'null'] };
@@ -314,7 +315,18 @@ class MeetingsService {
     m.status = 'processando';
     this.emit('meetings:update', this.snapshot());
 
-    const prompt = `${instructions({ ...data, isoDate: m.isoDate }, selfName)}\n${data.text}`;
+    // Reunião longa: o modelo local condensa antes, e só o resumo vai para o Claude (economiza cota).
+    let body = data.text;
+    delete m.preSummary;
+    const minChars = config.meetings?.preSummaryMinChars ?? 40000;
+    if (config.meetings?.localPreSummary !== false && config.ollama?.enabled !== false && config.features?.meetings?.provider !== 'ollama' && body.length > minChars) {
+      const short = await preSummarize({ config, text: body });
+      if (short) {
+        m.preSummary = { from: body.length, to: short.length };
+        body = short;
+      }
+    }
+    const prompt = `${instructions({ ...data, isoDate: m.isoDate }, selfName)}\n${body}`;
     const result = await askOnce({ feature: 'meetings', prompt, schema: SCHEMA, config, usage: this.usage });
     this.textCache.delete(key);
 
