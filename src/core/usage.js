@@ -10,9 +10,10 @@ function today() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+const emptyProvider = () => ({ calls: 0, input: 0, cached: 0, output: 0, costUsd: 0, byModel: {} });
+
 function emptyDay() {
-  const p = () => ({ calls: 0, input: 0, cached: 0, output: 0, costUsd: 0, byModel: {} });
-  return { claude: p(), codex: p() };
+  return { claude: emptyProvider(), codex: emptyProvider() };
 }
 
 class UsageTracker {
@@ -34,8 +35,8 @@ class UsageTracker {
     const f = ((day.byFeature ||= {})[feature] ||= { calls: 0, tokens: 0, claude: 0, codex: 0 });
     f.calls += 1;
     f.tokens += input + cached + output;
-    f[provider] += input + cached + output;
-    const p = day[provider];
+    f[provider] = (f[provider] || 0) + input + cached + output;
+    const p = (day[provider] ||= emptyProvider()); // outras IAs (Gemini, local) entram na primeira vez
     p.calls += 1;
     p.input += input;
     p.cached += cached;
@@ -91,6 +92,11 @@ class UsageTracker {
       /* sessão em escrita ou formato inesperado: mantém o último valor */
     }
     return this.store.data.limits.codex;
+  }
+
+  /** Pedidos feitos hoje a uma IA (para estimar a cota das que não informam o uso). */
+  callsToday(provider) {
+    return this.day()[provider]?.calls || 0;
   }
 
   limits() {
