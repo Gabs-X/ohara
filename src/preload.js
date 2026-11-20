@@ -118,6 +118,7 @@ contextBridge.exposeInMainWorld('central', {
   interviewAnswerNow: inv('interview:answerNow'),
   interviewAsk: inv('interview:ask'),
   interviewOpenContext: inv('interview:openContext'),
+  interviewOpenLog: inv('interview:openLog'),
   interviewHide: inv('interview:hide'),
   interviewNew: inv('interview:new'),
   onInterviewStatus: on('interview:status'),

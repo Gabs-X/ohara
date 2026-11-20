@@ -156,13 +156,13 @@ Os executáveis não são assinados, então o SmartScreen pode avisar na primeir
 
 Para entrevistas em inglês no Teams (ou qualquer app de chamada). Abra com **Ctrl+Alt+E** ou pela bandeja → **Modo entrevista** e clique em **Começar a ouvir**.
 
-1. A Ohara capta o **áudio que sai do PC** (loopback: a voz de quem entrevista). O seu microfone não é captado. Funciona com fone ou alto-falante.
+1. A Ohara capta o **áudio que sai do PC** (loopback: a voz de quem entrevista) e o seu **microfone**. Só a voz de quem entrevista gera respostas; a sua vai para a transcrição salva e ajuda o Claude a entender perguntas de continuação. Com fone de ouvido as vozes ficam bem separadas; no alto-falante, o eco da outra pessoa no microfone é filtrado. Para não captar o microfone: `interview.captureMic: false`.
 2. Cada fala é cortada pelo volume e transcrita em inglês pelo Whisper local (modelo `small`, uns 3 s por trecho). Falas longas são transcritas aos pedaços enquanto a pessoa ainda fala.
 3. Quando a pessoa faz uma pausa, a fala vai para o Claude (`haiku`, sem ferramentas nem MCP, para responder rápido) junto com o `contexto.md` e as falas anteriores. Se for pergunta, aparece um cartão com a pergunta traduzida e 3 a 4 tópicos curtos em inglês. Se não for (apresentação, falas sobre a empresa), nada aparece.
 4. **Responder agora** analisa o que já foi dito sem esperar a pausa. Se a transcrição falhar, dá para digitar a pergunta no campo de baixo.
 
 O **Contexto** abre `%APPDATA%\Ohara\entrevista\contexto.md`: cole ali o currículo e a descrição da vaga. Ele é mandado inteiro a cada pergunta, e a IA não inventa nada que não esteja nele.
-A transcrição e as respostas são salvas em `<outputDir>\Entrevistas\entrevista-<data>.md`. Ajustes em `interview` no `config.json` (modelo do Whisper, modelo do Claude, tamanho mínimo da fala).
+A transcrição (com horário, **Entrevistador** e **Eu**) e as respostas sugeridas são salvas em `<outputDir>\Entrevistas\entrevista-<data>.md`; o botão **Transcrição** abre o arquivo. Ajustes em `interview` no `config.json` (modelo do Whisper, modelo do Claude, tamanho mínimo da fala).
 
 ## Reuniões e painel de demandas
 

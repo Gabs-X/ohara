@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { InterviewService, cleanTranscript, worthAnalyzing, buildSystemPrompt, buildTurn, parseAnswer } = require('../src/core/interview');
+const { InterviewService, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, parseAnswer } = require('../src/core/interview');
 
 test('descarta alucinações do Whisper em silêncio', () => {
   assert.strictEqual(cleanTranscript('[BLANK_AUDIO]'), '');
@@ -196,6 +196,62 @@ test('Parar → Começar continua a mesma entrevista e o Claude novo recebe tudo
   assert.strictEqual(svc.lines.length, 0);
   await svc.start();
   assert.notStrictEqual(svc.cards.length, 1);
+  svc.stop();
+});
+
+test('a sua fala (microfone) vai para a transcrição como "Eu", nunca vira pergunta e entra no histórico do Claude', async () => {
+  const { svc, sent } = fakeService(
+    ['Tell me about your last project.', 'I built a React dashboard with TypeScript at Triforce.', 'Tell me about your last project.', 'Why did you choose React for it?'],
+    ['PT: Fale do último projeto\n- Dashboard', 'PT: Por que React?\n- Typed UI'],
+  );
+  await svc.start();
+  svc.addAudio(new Uint8Array([1]), { turnEnd: true });
+  await settle();
+  svc.addAudio(new Uint8Array([2]), { turnEnd: true, speaker: 'me', startedAt: Date.now() + 5000 });
+  await settle();
+  assert.strictEqual(sent.length, 1); // a sua fala não chama a IA
+  svc.addAudio(new Uint8Array([3]), { speaker: 'me' }); // eco da outra pessoa no alto-falante
+  await settle();
+  svc.addAudio(new Uint8Array([4]), { turnEnd: true, startedAt: Date.now() + 10_000 });
+  await settle();
+  assert.deepStrictEqual(svc.lines.map((l) => l.speaker), ['them', 'me', 'them']);
+  assert.match(sent[1], /Interviewer: Tell me about your last project\.\nCandidate: I built a React dashboard/);
+  const log = fs.readFileSync(svc.logFile, 'utf8');
+  assert.match(log, /`\d{2}:\d{2}:\d{2}` \*\*Entrevistador:\*\* Tell me about your last project\./);
+  assert.match(log, /`\d{2}:\d{2}:\d{2}` \*\*Eu:\*\* I built a React dashboard with TypeScript at Triforce\./);
+  assert.strictEqual((log.match(/\*\*Eu:\*\*/g) || []).length, 1);
+  svc.stop();
+});
+
+test('eco: fala do microfone repetindo quem entrevista é descartada', () => {
+  assert.strictEqual(isEcho('Tell me about your last project', ['So, tell me about your last project.']), true);
+  assert.strictEqual(isEcho('My last project was a React dashboard', ['Tell me about your last project.']), false);
+});
+
+test('depois que você responde, a fala seguinte de quem entrevista é pergunta nova (não continuação)', async () => {
+  const { svc, events, sent } = fakeService(
+    ['What is your experience with React?', 'Yes, I use it daily.', 'And what about testing frameworks?'],
+    ['PT: Experiência com React?\n- Daily', 'PT: E testes?\n- Jest'],
+  );
+  await svc.start();
+  svc.addAudio(new Uint8Array([1]), { turnEnd: true, startedAt: Date.now() });
+  await settle();
+  svc.addAudio(new Uint8Array([2]), { speaker: 'me', startedAt: Date.now() });
+  svc.addAudio(new Uint8Array([3]), { turnEnd: true, startedAt: Date.now() + 500 });
+  await settle();
+  assert.doesNotMatch(sent[1], /continuation="true"/);
+  const ids = new Set(cardsOf(events).filter((c) => c.state === 'done').map((c) => c.id));
+  assert.strictEqual(ids.size, 2);
+  svc.stop();
+});
+
+test('com captureMic desligado, o áudio do microfone é ignorado', async () => {
+  const { svc } = fakeService(['I built it']);
+  svc.getConfig = () => ({ outputDir: svc.dir, claude: { bin: 'claude' }, interview: { captureMic: false } });
+  await svc.start();
+  svc.addAudio(new Uint8Array([1]), { speaker: 'me' });
+  await settle();
+  assert.strictEqual(svc.lines.length, 0);
   svc.stop();
 });
 

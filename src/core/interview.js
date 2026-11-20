@@ -1,6 +1,7 @@
 // Modo entrevista: ouve o áudio do PC (a voz de quem entrevista no Teams), transcreve em inglês com o
 // Whisper local e, a cada pergunta, pede ao Claude (modelo rápido) tópicos curtos de resposta baseados no
-// seu currículo e na vaga (contexto.md). Nada é gravado em áudio; só o texto vai para um .md da entrevista.
+// seu currículo e na vaga (contexto.md). O seu microfone também é transcrito, só para a transcrição salva
+// (e o contexto do Claude) terem as suas respostas. Nada é gravado em áudio; só o texto vai para um .md.
 //
 // Velocidade: ao clicar em "Começar a ouvir", o whisper-server (modelo carregado uma vez) e um processo do
 // Claude (entrada em stream-json, sem MCP nem ferramentas) já ficam abertos. Cada pergunta só manda uma
@@ -28,6 +29,18 @@ function cleanTranscript(text) {
 }
 
 const wordCount = (s) => (String(s).match(/[\p{L}\p{N}']+/gu) || []).length;
+const words = (s) => String(s).toLowerCase().match(/[\p{L}\p{N}']+/gu) || [];
+
+// Com alto-falante, o microfone também capta a voz de quem entrevista. Fala do microfone cujas palavras
+// quase todas acabaram de aparecer no áudio do PC é eco, não você.
+function isEcho(text, recentTheirs) {
+  const mine = words(text);
+  if (!mine.length) return true;
+  const theirs = new Set(recentTheirs.flatMap(words));
+  return mine.filter((w) => theirs.has(w)).length / mine.length >= 0.7;
+}
+
+const speakerLabel = (l) => (l.speaker === 'me' ? 'Candidate' : 'Interviewer');
 
 // Vale chamar a IA? Fala muito curta e sem cara de pergunta ("Great.", "Sure, sure.") não gasta cota.
 const QUESTION_HINT = /\?|\b(what|why|how|when|where|which|who|tell me|walk me|describe|explain|give me|can you|could you|would you|do you|did you|have you|are you|is there|share)\b/i;
@@ -41,8 +54,9 @@ function worthAnalyzing(text, minWords = 4) {
 function buildSystemPrompt(context) {
   return [
     'You are a live interview copilot for a candidate in a job interview in English on Microsoft Teams.',
-    'Each user message brings the recent transcript of what the INTERVIEWERS said (speech-to-text, may contain',
-    'recognition errors) and their LATEST speech.',
+    'Each user message brings the recent transcript of the call (speech-to-text, may contain recognition errors),',
+    'with "Interviewer:" and "Candidate:" lines (what the candidate already answered), and the LATEST interviewer speech.',
+    'Use what the candidate already said to understand follow-ups ("can you elaborate on that?").',
     '',
     'Task: decide if the LATEST speech asks the candidate something (a question, a request like "tell me about...",',
     'or a follow-up). Small talk that expects an answer ("how are you today?") counts as a question.',
@@ -84,8 +98,8 @@ function buildEarlier({ lines, cards }) {
   const qa = cards.filter((c) => c.bullets?.length).map((c) => `Q: ${c.original}\nSuggested: ${c.bullets.join(' / ')}`);
   return [
     '<earlier_in_this_interview>',
-    'Everything the interviewers said so far:',
-    ...lines.map((l) => `- ${l.text}`),
+    'Everything said so far:',
+    ...lines.map((l) => `${speakerLabel(l)}: ${l.text}`),
     ...(qa.length ? ['', 'Talking points you already suggested (stay consistent with them):', ...qa] : []),
     '</earlier_in_this_interview>',
     '',
@@ -249,20 +263,26 @@ class InterviewService {
 
   reset() {
     this.active = false;
-    this.lines = []; // { at, text }
+    this.lines = []; // { at, text, speaker: 'them' | 'me' }
     this.pending = ''; // fala do entrevistador ainda sem análise
     this.queue = [];
+    this.myQueue = []; // trechos do seu microfone: transcritos só quando não há fala de quem entrevista na fila
     this.transcribing = false;
     this.analyzing = false;
     this.rerun = false;
     this.cards = [];
+    this.mySpeechAt = 0;
     this.lastCard = null; // para juntar a continuação de uma pergunta ao mesmo cartão
     this.logFile = null;
     this.seq = 0;
   }
 
   get settings() {
-    return { whisperModel: 'small', whisperBinDir: '', model: 'haiku', minWords: 4, historyLines: 14, mergeWindowMs: 3000, resumeWithinMs: 3 * 60 * 60 * 1000, ...this.getConfig().interview };
+    return { whisperModel: 'small', whisperBinDir: '', model: 'haiku', minWords: 4, historyLines: 20, captureMic: true, mergeWindowMs: 3000, resumeWithinMs: 3 * 60 * 60 * 1000, ...this.getConfig().interview };
+  }
+
+  transcriptsDir() {
+    return path.join(this.getConfig().outputDir || this.dir, 'Entrevistas');
   }
 
   ensureContext() {
@@ -285,6 +305,7 @@ class InterviewService {
       lines: this.lines.slice(-40),
       cards: this.cards.slice(-20),
       logFile: this.logFile,
+      captureMic: this.settings.captureMic !== false,
       contextFile: this.contextFile,
       whisper: this.whisper.status({ model: this.settings.whisperModel }),
     };
@@ -302,13 +323,13 @@ class InterviewService {
     // Parou e voltou (ou fechou a janela) na mesma entrevista: continua com tudo o que já foi dito.
     const resume = !!this.logFile && (this.lines.length || this.cards.length) && Date.now() - (this.lastActivity || 0) < s.resumeWithinMs;
     if (resume) {
-      Object.assign(this, { queue: [], pending: '', pendingSince: 0, transcribing: false, analyzing: false, rerun: false, lastCard: null });
+      Object.assign(this, { queue: [], myQueue: [], pending: '', pendingSince: 0, transcribing: false, analyzing: false, rerun: false, lastCard: null });
       this.active = true;
       this.#log(`_Retomada às ${new Date().toLocaleTimeString('pt-BR')}._`);
     } else {
       this.reset();
       this.active = true;
-      const outDir = path.join(this.getConfig().outputDir || this.dir, 'Entrevistas');
+      const outDir = this.transcriptsDir();
       fs.mkdirSync(outDir, { recursive: true });
       const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
       this.logFile = path.join(outDir, `entrevista-${stamp}.md`);
@@ -352,6 +373,7 @@ class InterviewService {
     this.lastActivity = Date.now();
     this.active = false;
     this.queue.length = 0;
+    this.myQueue.length = 0;
     this.server?.stop();
     this.server = null;
     this.session?.stop();
@@ -369,12 +391,23 @@ class InterviewService {
     }
   }
 
-  /** Um trecho de áudio (WAV 16 kHz mono). turnEnd = depois dele veio uma pausa (fim de fala). */
-  addAudio(bytes, { turnEnd = false, startedAt } = {}) {
+  #say(who, text) {
+    this.#log(`\`${new Date().toLocaleTimeString('pt-BR')}\` **${who}:** ${text}`);
+  }
+
+  /**
+   * Um trecho de áudio (WAV 16 kHz mono). turnEnd = depois dele veio uma pausa (fim de fala).
+   * speaker 'me' = seu microfone: só vai para a transcrição e o histórico, nunca vira pergunta.
+   */
+  addAudio(bytes, { turnEnd = false, startedAt, speaker } = {}) {
     if (!this.active) return;
+    const me = speaker === 'me';
+    if (me && this.settings.captureMic === false) return;
     const file = path.join(this.tmp, `trecho-${Date.now()}-${++this.seq}.wav`);
     fs.writeFileSync(file, Buffer.from(bytes));
-    this.queue.push({ file, turnEnd, startedAt: Number.isFinite(startedAt) ? startedAt : Date.now() });
+    const item = { file, turnEnd: me ? false : turnEnd, startedAt: Number.isFinite(startedAt) ? startedAt : Date.now(), speaker: me ? 'me' : 'them' };
+    (me ? this.myQueue : this.queue).push(item);
+    if (me) this.mySpeechAt = item.startedAt; // você falou: a próxima fala de quem entrevista é pergunta nova
     this.#drain();
   }
 
@@ -395,8 +428,9 @@ class InterviewService {
     this.transcribing = true;
     let failed = false;
     try {
-      while (this.active && this.queue.length) {
-        const { file, turnEnd, startedAt } = this.queue.shift();
+      // A voz de quem entrevista vem primeiro (é dela que sai a resposta); a sua é transcrita nas brechas.
+      while (this.active && (this.queue.length || this.myQueue.length)) {
+        const { file, turnEnd, startedAt, speaker = 'them' } = this.queue.length ? this.queue.shift() : this.myQueue.shift();
         let text = '';
         if (file) {
           if (!this.analyzing) this.#status('transcribing', 'Transcrevendo…');
@@ -410,14 +444,23 @@ class InterviewService {
             fs.rm(file, { force: true }, () => {});
           }
         }
-        if (text) {
-          const line = { at: Date.now(), text };
+        if (text && speaker === 'me') {
+          const recentTheirs = this.lines.filter((l) => l.speaker !== 'me' && l.at > Date.now() - 20_000).map((l) => l.text);
+          if (!isEcho(text, recentTheirs)) {
+            const line = { at: Date.now(), text, speaker: 'me' };
+            this.lines.push(line);
+            this.lastActivity = line.at;
+            this.emit('interview:line', line);
+            this.#say('Eu', text);
+          }
+        } else if (text) {
+          const line = { at: Date.now(), text, speaker: 'them' };
           this.lines.push(line);
           this.lastActivity = line.at;
           if (!this.pending) this.pendingSince = startedAt || line.at;
           this.pending = `${this.pending} ${text}`.trim();
           this.emit('interview:line', line);
-          this.#log(`**Entrevistador:** ${text}`);
+          this.#say('Entrevistador', text);
         }
         if (turnEnd) this.#maybeAnalyze();
       }
@@ -443,7 +486,8 @@ class InterviewService {
 
   /** Botão "Responder agora": analisa o que já foi dito, mesmo sem pausa. */
   answerNow() {
-    if (!this.pending && this.lines.length) this.pending = this.lines.slice(-3).map((l) => l.text).join(' ');
+    const theirs = this.lines.filter((l) => l.speaker !== 'me');
+    if (!this.pending && theirs.length) this.pending = theirs.slice(-3).map((l) => l.text).join(' ');
     this.#maybeAnalyze(true);
   }
 
@@ -467,17 +511,18 @@ class InterviewService {
     // Pausa curta no meio da pergunta: a continuação vai junto com o começo e atualiza o mesmo cartão.
     // Mede do fim da fala anterior até o começo da fala nova (você ainda não começou a responder).
     const prev = this.lastCard;
-    const continuation = !!prev && since - prev.endedAt < s.mergeWindowMs;
+    const answered = (this.mySpeechAt || 0) > prev?.since; // você já começou a responder depois da pergunta
+    const continuation = !!prev && !answered && since - prev.endedAt < s.mergeWindowMs;
     const latest = continuation ? `${prev.original} ${spoken}` : spoken;
     const startedAt = Date.now();
     const card = { id: continuation ? prev.id : `c${startedAt}`, at: startedAt, original: latest, questionPt: '', bullets: [], state: 'thinking' };
-    this.lastCard = { id: card.id, original: latest, endedAt: startedAt };
+    this.lastCard = { id: card.id, original: latest, endedAt: startedAt, since: continuation ? prev.since : since };
     this.analyzing = true;
     if (!continuation || prev.dismissed) this.emit('interview:card', card);
     this.#status('thinking', 'Pensando na resposta…');
 
     const recent = this.lines.slice(-s.historyLines);
-    const history = recent.map((l) => l.text);
+    const history = recent.map((l) => `${speakerLabel(l)}: ${l.text}`);
     // Processo novo (retomada ou o Claude reabriu): manda junto o que veio antes das falas recentes.
     const earlierLines = this.lines.slice(0, this.lines.length - recent.length);
     const message = (fresh) => buildTurn({
@@ -521,4 +566,4 @@ class InterviewService {
   }
 }
 
-module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, buildSystemPrompt, buildTurn, buildEarlier, parseAnswer, DEFAULT_CONTEXT };
+module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, buildEarlier, parseAnswer, DEFAULT_CONTEXT };

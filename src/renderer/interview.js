@@ -50,34 +50,36 @@ function wav(samples) {
 // ---------- Captura ----------
 let capture = null;
 
-async function startCapture() {
-  // O processo principal responde com o áudio do sistema (loopback); o vídeo é descartado na hora.
-  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-  stream.getVideoTracks().forEach((t) => t.stop());
-  const track = stream.getAudioTracks()[0];
-  if (!track) {
-    stream.getTracks().forEach((t) => t.stop());
-    throw new Error('O Windows não entregou o áudio do PC.');
-  }
-  const ctx = new AudioContext();
+/**
+ * Corta um áudio em falas pelo volume e manda cada trecho ao processo principal.
+ * speaker 'them' = áudio do PC (quem entrevista): pausas viram "fim de fala" e disparam a resposta.
+ * speaker 'me' = seu microfone: só transcrito, para a transcrição salva ter as suas respostas.
+ */
+function listen(ctx, track, { speaker, minLevel, onLevel }) {
+  const me = speaker === 'me';
   const src = ctx.createMediaStreamSource(new MediaStream([track]));
   const proc = ctx.createScriptProcessor(2048, 1, 1); // mistura os canais em mono
   const mute = ctx.createGain();
   mute.gain.value = 0; // processa sem tocar de volta (senão ecoaria)
   const rate = ctx.sampleRate;
   const chunkMs = (2048 / rate) * 1000;
+  // A sua fala não dispara nada: dá para esperar pausas maiores e mandar trechos mais longos.
+  const endSilence = me ? 1200 : END_SILENCE_MS;
+  const softSplit = me ? 8000 : SOFT_SPLIT_MS;
+  const softPause = me ? 400 : SOFT_PAUSE_MS;
+  const hardSplit = me ? 15000 : HARD_SPLIT_MS;
   const preRoll = [];
   let seg = null;
-  let noise = 0.002;
+  let noise = minLevel / 3;
   let turnOpen = false; // já mandou trecho desta fala sem o "fim de fala"
   let silentMs = 0;
 
   const send = (done, turnEnd) => {
     if (done.speechMs >= MIN_SPEECH_MS) {
       // startedAt: quando a fala começou (para saber se é continuação da pergunta anterior).
-      central.interviewAudio(wav(downsample(done.chunks, rate)), { turnEnd, startedAt: Date.now() - Math.round(done.ms) });
+      central.interviewAudio(wav(downsample(done.chunks, rate)), { turnEnd, startedAt: Date.now() - Math.round(done.ms), speaker });
       turnOpen = !turnEnd;
-    } else if (turnEnd && turnOpen) {
+    } else if (turnEnd && turnOpen && !me) {
       central.interviewTurnEnd();
       turnOpen = false;
     }
@@ -88,8 +90,8 @@ async function startCapture() {
     let sum = 0;
     for (let i = 0; i < data.length; i += 2) sum += data[i] * data[i];
     const rms = Math.sqrt(sum / (data.length / 2));
-    $('level').firstElementChild.style.width = `${Math.min(100, rms * 900)}%`;
-    const voiced = rms > Math.max(0.006, noise * 3);
+    onLevel?.(rms);
+    const voiced = rms > Math.max(minLevel, noise * 3);
     if (!seg && !voiced) noise = noise * 0.98 + rms * 0.02;
     silentMs = voiced ? 0 : silentMs + chunkMs;
 
@@ -99,8 +101,8 @@ async function startCapture() {
       if (voiced) {
         seg = { chunks: [...preRoll], ms: preRoll.length * chunkMs, speechMs: 0 };
         preRoll.length = 0;
-      } else if (turnOpen && silentMs > END_SILENCE_MS) {
-        central.interviewTurnEnd(); // a fala acabou logo depois de um corte por tamanho
+      } else if (turnOpen && silentMs > endSilence) {
+        if (!me) central.interviewTurnEnd(); // a fala acabou logo depois de um corte por tamanho
         turnOpen = false;
       }
       return;
@@ -109,10 +111,10 @@ async function startCapture() {
     seg.ms += chunkMs;
     if (voiced) seg.speechMs += chunkMs;
 
-    if (silentMs > END_SILENCE_MS) {
+    if (silentMs > endSilence) {
       send(seg, true);
       seg = null;
-    } else if ((seg.ms > SOFT_SPLIT_MS && silentMs > SOFT_PAUSE_MS) || seg.ms > HARD_SPLIT_MS) {
+    } else if ((seg.ms > softSplit && silentMs > softPause) || seg.ms > hardSplit) {
       send(seg, false);
       seg = null;
     }
@@ -120,14 +122,44 @@ async function startCapture() {
   src.connect(proc);
   proc.connect(mute);
   mute.connect(ctx.destination);
+  return () => {
+    proc.onaudioprocess = null;
+    try { src.disconnect(); proc.disconnect(); mute.disconnect(); } catch { /* já desligado */ }
+  };
+}
+
+async function startCapture({ mic }) {
+  // O processo principal responde com o áudio do sistema (loopback); o vídeo é descartado na hora.
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+  stream.getVideoTracks().forEach((t) => t.stop());
+  const track = stream.getAudioTracks()[0];
+  if (!track) {
+    stream.getTracks().forEach((t) => t.stop());
+    throw new Error('O Windows não entregou o áudio do PC.');
+  }
+  const ctx = new AudioContext();
+  const level = (rms) => { $('level').firstElementChild.style.width = `${Math.min(100, rms * 900)}%`; };
+  const stops = [listen(ctx, track, { speaker: 'them', minLevel: 0.006, onLevel: level })];
+  const streams = [stream];
+  let micError = '';
+  if (mic) {
+    try {
+      // Cancelamento de eco e supressão de ruído do Chromium: ajudam quando a call sai no alto-falante.
+      const micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      streams.push(micStream);
+      stops.push(listen(ctx, micStream.getAudioTracks()[0], { speaker: 'me', minLevel: 0.012 }));
+    } catch (err) {
+      micError = err.message || 'sem acesso ao microfone';
+    }
+  }
   if (ctx.state === 'suspended') await ctx.resume();
   track.addEventListener('ended', () => { stopAll(); renderStatus({ mode: 'error', text: 'A captura do áudio foi interrompida.' }); });
 
   return {
+    micError,
     stop() {
-      proc.onaudioprocess = null;
-      try { src.disconnect(); proc.disconnect(); mute.disconnect(); } catch { /* já desligado */ }
-      stream.getTracks().forEach((t) => t.stop());
+      stops.forEach((f) => f());
+      streams.forEach((st) => st.getTracks().forEach((t) => t.stop()));
       ctx.close().catch(() => {});
     },
   };
@@ -189,7 +221,8 @@ function renderCard(c) {
 
 function addLine(line) {
   const box = $('transcript');
-  const p = el('p', null, line.text);
+  const p = el('p', line.speaker === 'me' ? 'me' : null);
+  p.append(el('b', null, line.speaker === 'me' ? 'Eu: ' : 'Entrevistador: '), line.text);
   p.title = new Date(line.at).toLocaleTimeString('pt-BR');
   box.append(p);
   while (box.childElementCount > 60) box.firstElementChild.remove();
@@ -215,13 +248,14 @@ $('toggle').addEventListener('click', async () => {
     const r = await central.interviewStart();
     if (!r.ok) throw new Error(r.error);
     try {
-      capture = await startCapture();
+      capture = await startCapture({ mic: micEnabled });
     } catch (err) {
       await central.interviewStop();
       throw err;
     }
     setRunning(true);
-    renderStatus({ mode: 'listening', text: 'Ouvindo o áudio do PC' });
+    if (capture.micError) renderStatus({ mode: 'error', text: `Ouvindo só o PC: microfone indisponível (${capture.micError}).` });
+    else renderStatus({ mode: 'listening', text: micEnabled ? 'Ouvindo o PC e o seu microfone' : 'Ouvindo o áudio do PC' });
   } catch (err) {
     setRunning(false);
     renderStatus({ mode: 'error', text: err.message });
@@ -230,6 +264,7 @@ $('toggle').addEventListener('click', async () => {
   }
 });
 
+$('log').addEventListener('click', () => central.interviewOpenLog());
 $('now').addEventListener('click', () => central.interviewAnswerNow());
 $('context').addEventListener('click', () => central.interviewOpenContext());
 $('new').addEventListener('click', async () => {
@@ -258,7 +293,9 @@ central.onInterviewStatus(renderStatus);
 central.onInterviewCard(renderCard);
 central.onInterviewLine(addLine);
 
+let micEnabled = true;
 central.interviewSnapshot().then((s) => {
+  micEnabled = s.captureMic !== false;
   for (const l of s.lines) addLine(l);
   for (const c of s.cards) renderCard(c);
   if (!s.whisper.installed) renderStatus({ mode: 'error', text: `Falta o modelo "${s.whisper.modelName}" do Whisper.` });

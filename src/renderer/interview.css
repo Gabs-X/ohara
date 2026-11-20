@@ -44,6 +44,8 @@ button.icon { padding: 0 6px; border: 0; background: transparent; font-size: 18p
 #transcript-box summary { cursor: pointer; color: #aeb9cd; font-size: 12px; }
 #transcript { overflow-y: auto; margin-top: 6px; color: #c7d0df; font-size: 12px; line-height: 1.45; }
 #transcript p { margin: 0 0 4px; }
+#transcript b { color: #8b97ad; font-weight: 600; }
+#transcript p.me { color: #a5f3fc; }
 
 #manual { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid #252d40; }
 #manual input { flex: 1; min-width: 0; color: #f1f5f9; background: #0e121b; border: 1px solid #3a4560; border-radius: 6px; padding: 6px 8px; font: inherit; }

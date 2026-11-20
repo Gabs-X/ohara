@@ -135,7 +135,8 @@ const DEFAULT_CONFIG = {
     mergeWindowMs: 3000, // fala que começa até 3 s depois da anterior = continuação da mesma pergunta
     model: 'haiku', // modelo do Claude para os tópicos (rápido)
     minWords: 4, // fala menor que isso, sem cara de pergunta, não chama a IA
-    historyLines: 14, // falas anteriores mandadas junto, para entender perguntas de continuação
+    historyLines: 20, // falas anteriores (suas e de quem entrevista) mandadas junto, para entender perguntas de continuação
+    captureMic: true, // também transcreve o seu microfone, para a transcrição salva ter as suas respostas
   },
 };
 

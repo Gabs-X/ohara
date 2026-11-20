@@ -1007,6 +1007,11 @@ function registerIpc() {
   handle('interview:answerNow', () => interview.answerNow());
   handle('interview:ask', (text) => interview.ask(String(text || '').slice(0, 2000)));
   handle('interview:openContext', () => shell.openPath(interview.ensureContext()));
+  handle('interview:openLog', () => {
+    if (interview.logFile && fs.existsSync(interview.logFile)) return shell.openPath(interview.logFile);
+    fs.mkdirSync(interview.transcriptsDir(), { recursive: true });
+    return shell.openPath(interview.transcriptsDir());
+  });
   handle('interview:hide', () => interviewWin?.hide());
   handle('interview:new', () => interview.newInterview());
   handle('quick:openInMain', (chatId) => {
@@ -1022,7 +1027,7 @@ app.on('second-instance', () => toggleWindow());
 app.whenReady().then(() => {
   app.setAppUserModelId('com.gabsx.central-ia');
   // Sem captura de microfone nesta edição. A única exceção é a janela do modo entrevista,
-  // que capta o áudio do PC (loopback: a voz de quem está na call), nunca o microfone.
+  // que capta o áudio do PC (loopback: a voz de quem está na call) e o microfone (só para a transcrição salva).
   const isInterview = (wc) => !!interviewWin && !interviewWin.isDestroyed() && wc === interviewWin.webContents;
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(isInterview(wc) && ['media', 'display-capture'].includes(permission)));
   session.defaultSession.setPermissionCheckHandler((wc, permission) => isInterview(wc) && ['media', 'display-capture'].includes(permission));
