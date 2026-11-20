@@ -6,10 +6,11 @@ const $ = (id) => document.getElementById(id);
 const TARGET_RATE = 16000;
 
 // Corte das falas. Áudio do Teams é limpo (silêncio quase zero), então o limiar é baixo.
-const END_SILENCE_MS = 1100; // pausa que encerra a fala de quem pergunta (dispara a análise)
-const SOFT_SPLIT_MS = 6000; // depois disso, corta na primeira respirada (transcreve enquanto a pessoa fala)
-const SOFT_PAUSE_MS = 250;
-const HARD_SPLIT_MS = 12000;
+// Pausa curta dispara a análise cedo; se a pessoa continuar, a continuação atualiza o mesmo cartão.
+const END_SILENCE_MS = 700;
+const SOFT_SPLIT_MS = 3000; // depois disso, corta na primeira respirada: no fim da pergunta sobra só um trecho curto
+const SOFT_PAUSE_MS = 200;
+const HARD_SPLIT_MS = 8000;
 const MIN_SPEECH_MS = 350;
 const PRE_ROLL_MS = 300;
 
@@ -73,7 +74,8 @@ async function startCapture() {
 
   const send = (done, turnEnd) => {
     if (done.speechMs >= MIN_SPEECH_MS) {
-      central.interviewAudio(wav(downsample(done.chunks, rate)), { turnEnd });
+      // startedAt: quando a fala começou (para saber se é continuação da pergunta anterior).
+      central.interviewAudio(wav(downsample(done.chunks, rate)), { turnEnd, startedAt: Date.now() - Math.round(done.ms) });
       turnOpen = !turnEnd;
     } else if (turnEnd && turnOpen) {
       central.interviewTurnEnd();

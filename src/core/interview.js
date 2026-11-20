@@ -1,10 +1,16 @@
 // Modo entrevista: ouve o áudio do PC (a voz de quem entrevista no Teams), transcreve em inglês com o
 // Whisper local e, a cada pergunta, pede ao Claude (modelo rápido) tópicos curtos de resposta baseados no
 // seu currículo e na vaga (contexto.md). Nada é gravado em áudio; só o texto vai para um .md da entrevista.
+//
+// Velocidade: ao clicar em "Começar a ouvir", o whisper-server (modelo carregado uma vez) e um processo do
+// Claude (entrada em stream-json, sem MCP nem ferramentas) já ficam abertos. Cada pergunta só manda uma
+// mensagem nova para eles: ~0,5 s até a primeira palavra do Claude, contra ~3 s abrindo o processo a cada vez.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runJsonl, shorten } = require('./providers/common');
+const readline = require('readline');
+const { spawn } = require('child_process');
+const { killTree, shorten } = require('./providers/common');
 const { claudeEnv, friendlyError } = require('./providers/claude');
 
 // O Whisper "inventa" estas frases em trechos de silêncio ou ruído.
@@ -31,14 +37,16 @@ function worthAnalyzing(text, minWords = 4) {
   return wordCount(s) >= minWords || QUESTION_HINT.test(s);
 }
 
-function buildPrompt({ context, history, latest }) {
+// Instruções fixas + perfil: vão uma vez só, como prompt de sistema do processo que fica aberto.
+function buildSystemPrompt(context) {
   return [
     'You are a live interview copilot for a candidate in a job interview in English on Microsoft Teams.',
-    'Below: the candidate profile (resume and job description), the recent transcript of what the INTERVIEWERS said',
-    '(speech-to-text, may contain recognition errors) and their LATEST speech.',
+    'Each user message brings the recent transcript of what the INTERVIEWERS said (speech-to-text, may contain',
+    'recognition errors) and their LATEST speech.',
     '',
     'Task: decide if the LATEST speech asks the candidate something (a question, a request like "tell me about...",',
     'or a follow-up). Small talk that expects an answer ("how are you today?") counts as a question.',
+    'If the LATEST speech is marked as a continuation, it is the same question with more words: answer the full question again.',
     '',
     'If it does NOT ask anything (statements, the interviewer talking about the company, greetings that need no answer),',
     'reply with exactly: NONE',
@@ -50,22 +58,29 @@ function buildPrompt({ context, history, latest }) {
     '- <talking point>',
     '',
     'Rules for the talking points:',
-    '- 3 to 4 bullets, max 18 words each, easy to say out loud for a non-native speaker (B1/B2 level vocabulary).',
+    '- 3 to 4 bullets, max 14 words each, easy to say out loud for a non-native speaker (B1/B2 level vocabulary).',
+    '- Short spoken phrases, not full essays: the candidate glances at them while talking.',
     '- First bullet = the direct answer. Use concrete facts from the profile (companies, projects, technologies, results).',
     '- Behavioral questions: follow STAR briefly (situation, action, result).',
-    '- Never invent employers, numbers, certifications or experience that is not in the profile.',
+    '- Never invent employers, dates, numbers, certifications or experience that is not in the profile.',
+    '  Respect the dates in the profile exactly (e.g. a degree that ended is finished, a job that ended is past).',
     '  If the profile has nothing about it, give an honest answer (eager to learn, related experience).',
+    '- Stay consistent with what you suggested earlier in this interview.',
     '- No markdown besides the "- " bullets. No intro, no closing remarks.',
     '',
     '<profile>',
     String(context || '(no profile provided)').trim(),
     '</profile>',
-    '',
+  ].join('\n');
+}
+
+function buildTurn({ history, latest, continuation = false }) {
+  return [
     '<recent_transcript>',
     history.length ? history.join('\n') : '(start of interview)',
     '</recent_transcript>',
     '',
-    '<latest_interviewer_speech>',
+    continuation ? '<latest_interviewer_speech continuation="true">' : '<latest_interviewer_speech>',
     latest,
     '</latest_interviewer_speech>',
   ].join('\n');
@@ -100,6 +115,89 @@ Quanto mais concreto (projetos, números, resultados), melhores as respostas.
 (cole aqui o seu currículo)
 `;
 
+/**
+ * Um processo do Claude Code aberto durante toda a entrevista (entrada e saída em stream-json).
+ * Cada ask() manda uma mensagem e espera o "result" dela; pedidos ficam em fila.
+ */
+class ClaudeSession {
+  constructor({ bin, model, env, systemPrompt, onLimits }) {
+    Object.assign(this, { bin, model, env, systemPrompt, onLimits });
+    this.proc = null;
+    this.current = null; // { onDelta, resolve, text }
+    this.queue = [];
+    this.stderr = '';
+  }
+
+  start() {
+    if (this.proc) return;
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
+      '--model', this.model, '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config',
+      '--system-prompt', this.systemPrompt];
+    const proc = spawn(this.bin, args, { cwd: os.tmpdir(), env: { ...process.env, ...this.env }, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.proc = proc;
+    proc.stdin.on('error', () => {});
+    proc.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-4000); });
+    readline.createInterface({ input: proc.stdout }).on('line', (line) => {
+      let ev;
+      try { ev = JSON.parse(line.replace(/^﻿/, '').trim()); } catch { return; }
+      this.#onEvent(ev);
+    });
+    proc.on('error', (err) => this.#fail(err.message));
+    proc.on('exit', (code) => {
+      if (this.proc === proc) this.proc = null;
+      this.#fail(shorten(this.stderr, 200) || `o Claude fechou (código ${code})`);
+    });
+  }
+
+  #onEvent(ev) {
+    if (ev.type === 'rate_limit_event') this.onLimits?.(ev.rate_limit_info);
+    const cur = this.current;
+    if (!cur) return;
+    if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta' && ev.event.delta?.type === 'text_delta') {
+      cur.text += ev.event.delta.text;
+      cur.onDelta?.(cur.text);
+    }
+    if (ev.type === 'result') {
+      if (!cur.text && ev.result) cur.text = ev.result;
+      this.#finish({ text: cur.text, error: ev.is_error ? friendlyError(ev.result || ev.subtype) : null });
+    }
+  }
+
+  #finish(r) {
+    const cur = this.current;
+    this.current = null;
+    cur?.resolve(r);
+    this.#next();
+  }
+
+  #fail(msg) {
+    if (this.current) this.#finish({ text: this.current.text, error: friendlyError(msg) });
+    for (const q of this.queue.splice(0)) q.resolve({ text: '', error: friendlyError(msg) });
+  }
+
+  #next() {
+    if (this.current || !this.queue.length) return;
+    if (!this.proc) this.start();
+    this.current = this.queue.shift();
+    this.current.text = '';
+    this.proc.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: this.current.message } })}\n`);
+  }
+
+  ask(message, onDelta) {
+    return new Promise((resolve) => {
+      this.queue.push({ message, onDelta, resolve });
+      this.#next();
+    });
+  }
+
+  stop() {
+    const p = this.proc;
+    this.proc = null;
+    this.#fail('Entrevista encerrada.');
+    if (p?.pid) killTree(p.pid);
+  }
+}
+
 class InterviewService {
   /**
    * @param {object} o
@@ -108,15 +206,19 @@ class InterviewService {
    * @param {(channel:string, payload:any) => void} o.emit
    * @param {string} o.dataDir
    * @param {import('./usage').UsageTracker} [o.usage]
+   * @param {(o:object) => ClaudeSession} [o.createSession]  troca o Claude (testes)
    */
-  constructor({ whisper, getConfig, emit, dataDir, usage }) {
+  constructor({ whisper, getConfig, emit, dataDir, usage, createSession }) {
     this.whisper = whisper;
     this.getConfig = getConfig;
     this.emit = emit;
     this.usage = usage;
+    this.createSession = createSession || ((o) => new ClaudeSession(o));
     this.dir = path.join(dataDir, 'entrevista');
     this.contextFile = path.join(this.dir, 'contexto.md');
     this.tmp = path.join(os.tmpdir(), 'ohara-entrevista');
+    this.server = null;
+    this.session = null;
     this.reset();
   }
 
@@ -126,15 +228,16 @@ class InterviewService {
     this.pending = ''; // fala do entrevistador ainda sem análise
     this.queue = [];
     this.transcribing = false;
-    this.analyzing = null; // { abort }
+    this.analyzing = false;
     this.rerun = false;
     this.cards = [];
+    this.lastCard = null; // para juntar a continuação de uma pergunta ao mesmo cartão
     this.logFile = null;
     this.seq = 0;
   }
 
   get settings() {
-    return { whisperModel: 'small', model: 'haiku', minWords: 4, historyLines: 14, ...this.getConfig().interview };
+    return { whisperModel: 'small', whisperBinDir: '', model: 'haiku', minWords: 4, historyLines: 14, mergeWindowMs: 3000, ...this.getConfig().interview };
   }
 
   ensureContext() {
@@ -166,10 +269,11 @@ class InterviewService {
     this.emit('interview:status', { mode, text });
   }
 
-  start() {
+  async start() {
     if (this.active) return this.snapshot();
-    const st = this.whisper.status({ model: this.settings.whisperModel });
-    if (!st.installed) throw new Error(`Whisper ou o modelo "${this.settings.whisperModel}" não está instalado (pasta whisper da Ohara).`);
+    const s = this.settings;
+    const st = this.whisper.status({ model: s.whisperModel });
+    if (!st.installed) throw new Error(`Whisper ou o modelo "${s.whisperModel}" não está instalado (pasta whisper da Ohara).`);
     this.reset();
     this.active = true;
     fs.mkdirSync(this.tmp, { recursive: true });
@@ -178,14 +282,36 @@ class InterviewService {
     const stamp = new Date().toISOString().slice(0, 16).replace('T', '_').replace(':', 'h');
     this.logFile = path.join(outDir, `entrevista-${stamp}.md`);
     fs.writeFileSync(this.logFile, `# Entrevista · ${new Date().toLocaleString('pt-BR')}\n\n`, 'utf8');
-    this.#status('listening', 'Ouvindo o áudio do PC');
+
+    this.#status('starting', 'Preparando o Claude e o Whisper…');
+    const config = this.getConfig();
+    this.session = this.createSession({
+      bin: config.claude.bin, model: s.model, env: claudeEnv(config), systemPrompt: buildSystemPrompt(this.readContext()),
+      onLimits: (info) => this.usage?.updateClaudeLimits?.(info),
+    });
+    this.session.start();
+    // Whisper sempre carregado; se o servidor falhar, cada trecho volta a usar o whisper-cli (mais lento).
+    if (this.whisper.server) {
+      const server = this.whisper.server({ model: s.whisperModel, language: 'en', binDir: s.whisperBinDir });
+      try {
+        await server.start();
+        if (this.active) this.server = server;
+        else server.stop();
+      } catch (err) {
+        this.#log(`_Whisper em modo servidor falhou (${err.message}); usando o modo lento._`);
+      }
+    }
+    if (this.active) this.#status('listening', this.server ? 'Ouvindo o áudio do PC' : 'Ouvindo (Whisper no modo lento)');
     return this.snapshot();
   }
 
   stop() {
     this.active = false;
     this.queue.length = 0;
-    this.analyzing?.abort();
+    this.server?.stop();
+    this.server = null;
+    this.session?.stop();
+    this.session = null;
     this.#status('off', this.logFile ? 'Parado. Transcrição salva.' : 'Parado');
     return this.snapshot();
   }
@@ -200,11 +326,11 @@ class InterviewService {
   }
 
   /** Um trecho de áudio (WAV 16 kHz mono). turnEnd = depois dele veio uma pausa (fim de fala). */
-  addAudio(bytes, { turnEnd = false } = {}) {
+  addAudio(bytes, { turnEnd = false, startedAt } = {}) {
     if (!this.active) return;
     const file = path.join(this.tmp, `trecho-${Date.now()}-${++this.seq}.wav`);
     fs.writeFileSync(file, Buffer.from(bytes));
-    this.queue.push({ file, turnEnd });
+    this.queue.push({ file, turnEnd, startedAt: Number.isFinite(startedAt) ? startedAt : Date.now() });
     this.#drain();
   }
 
@@ -215,18 +341,23 @@ class InterviewService {
     this.#drain();
   }
 
+  #transcribe(file) {
+    if (this.server) return this.server.transcribe(file);
+    return this.whisper.transcribe(file, { language: 'en', model: this.settings.whisperModel });
+  }
+
   async #drain() {
     if (this.transcribing) return;
     this.transcribing = true;
     let failed = false;
     try {
       while (this.active && this.queue.length) {
-        const { file, turnEnd } = this.queue.shift();
+        const { file, turnEnd, startedAt } = this.queue.shift();
         let text = '';
         if (file) {
           if (!this.analyzing) this.#status('transcribing', 'Transcrevendo…');
           try {
-            text = cleanTranscript(await this.whisper.transcribe(file, { language: 'en', model: this.settings.whisperModel }));
+            text = cleanTranscript(await this.#transcribe(file));
             failed = false;
           } catch (err) {
             failed = true;
@@ -238,6 +369,7 @@ class InterviewService {
         if (text) {
           const line = { at: Date.now(), text };
           this.lines.push(line);
+          if (!this.pending) this.pendingSince = startedAt || line.at;
           this.pending = `${this.pending} ${text}`.trim();
           this.emit('interview:line', line);
           this.#log(`**Entrevistador:** ${text}`);
@@ -258,8 +390,10 @@ class InterviewService {
       return;
     }
     const latest = this.pending;
+    const since = this.pendingSince || Date.now();
     this.pending = '';
-    this.#analyze(latest).catch(() => {});
+    this.pendingSince = 0;
+    this.#analyze(latest, since).catch(() => {});
   }
 
   /** Botão "Responder agora": analisa o que já foi dito, mesmo sem pausa. */
@@ -276,68 +410,57 @@ class InterviewService {
     this.#maybeAnalyze(true);
   }
 
-  async #analyze(latest) {
+  async #analyze(spoken, since = Date.now()) {
     const s = this.settings;
-    const historyLines = this.lines.slice(-s.historyLines).map((l) => l.text);
-    const prompt = buildPrompt({ context: this.readContext(), history: historyLines, latest });
-    const card = { id: `c${Date.now()}`, at: Date.now(), original: latest, questionPt: '', bullets: [], state: 'thinking' };
-    const controller = new AbortController();
-    this.analyzing = { abort: () => controller.abort() };
-    this.emit('interview:card', card);
+    if (!this.session) {
+      const config = this.getConfig();
+      this.session = this.createSession({
+        bin: config.claude.bin, model: s.model, env: claudeEnv(config), systemPrompt: buildSystemPrompt(this.readContext()),
+        onLimits: (info) => this.usage?.updateClaudeLimits?.(info),
+      });
+    }
+    // Pausa curta no meio da pergunta: a continuação vai junto com o começo e atualiza o mesmo cartão.
+    // Mede do fim da fala anterior até o começo da fala nova (você ainda não começou a responder).
+    const prev = this.lastCard;
+    const continuation = !!prev && since - prev.endedAt < s.mergeWindowMs;
+    const latest = continuation ? `${prev.original} ${spoken}` : spoken;
+    const startedAt = Date.now();
+    const card = { id: continuation ? prev.id : `c${startedAt}`, at: startedAt, original: latest, questionPt: '', bullets: [], state: 'thinking' };
+    this.lastCard = { id: card.id, original: latest, endedAt: startedAt };
+    this.analyzing = true;
+    if (!continuation || prev.dismissed) this.emit('interview:card', card);
     this.#status('thinking', 'Pensando na resposta…');
 
-    let text = '';
-    let error = null;
-    const config = this.getConfig();
-    try {
-      const { code, stderr, aborted } = await runJsonl({
-        cmd: config.claude.bin,
-        args: ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', s.model,
-          '--tools', '', '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config'],
-        env: claudeEnv(config),
-        cwd: os.tmpdir(),
-        input: prompt,
-        signal: controller.signal,
-        onJson: (ev) => {
-          if (ev.type === 'stream_event' && ev.event?.type === 'content_block_delta' && ev.event.delta?.type === 'text_delta') {
-            text += ev.event.delta.text;
-            const p = parseAnswer(text);
-            if (p.none) {
-              controller.abort(); // não é pergunta: para de gastar
-              return;
-            }
-            if (!p.pending) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
-          }
-          if (ev.type === 'rate_limit_event') this.usage?.updateClaudeLimits?.(ev.rate_limit_info);
-          if (ev.type === 'result') {
-            if (!text && ev.result) text = ev.result;
-            if (ev.is_error) error = ev.result || ev.subtype;
-          }
-        },
-      });
-      if (!text && !aborted && code !== 0) error = error || shorten(stderr, 200) || `claude saiu com código ${code}`;
-    } catch (err) {
-      error = err.message;
-    } finally {
-      this.analyzing = null;
-    }
+    const history = this.lines.slice(-s.historyLines).map((l) => l.text);
+    let dismissedEarly = false;
+    const r = await this.session.ask(buildTurn({ history, latest, continuation }), (text) => {
+      const p = parseAnswer(text);
+      if (p.none && !dismissedEarly) {
+        dismissedEarly = true;
+        this.emit('interview:card', { ...card, state: 'dismissed' });
+      } else if (!p.pending && !p.none) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
+    });
+    this.analyzing = false;
 
-    const parsed = parseAnswer(text);
+    const parsed = parseAnswer(r.text);
+    const finishedAt = Date.now();
     if (parsed.none) {
-      this.emit('interview:card', { ...card, state: 'dismissed' });
-    } else if (error && !parsed.bullets?.length) {
-      const done = { ...card, state: 'error', error: friendlyError(error) };
-      this.cards.push(done);
-      this.emit('interview:card', done);
+      if (!dismissedEarly) this.emit('interview:card', { ...card, state: 'dismissed' });
+      this.lastCard.dismissed = true;
     } else if (parsed.bullets?.length) {
-      const done = { ...card, ...parsed, state: 'done', ms: Date.now() - card.at };
-      this.cards.push(done);
+      const done = { ...card, ...parsed, state: 'done', ms: finishedAt - startedAt };
+      const i = this.cards.findIndex((c) => c.id === done.id);
+      if (i >= 0) this.cards[i] = done;
+      else this.cards.push(done);
       this.emit('interview:card', done);
       this.#log(`> **Pergunta:** ${done.questionPt}\n${done.bullets.map((b) => `> - ${b}`).join('\n')}`);
+    } else if (r.error) {
+      const done = { ...card, state: 'error', error: r.error };
+      this.cards.push(done);
+      this.emit('interview:card', done);
     } else {
       this.emit('interview:card', { ...card, state: 'dismissed' });
     }
-
     if (this.active) this.#status('listening', 'Ouvindo o áudio do PC');
     if (this.rerun) {
       this.rerun = false;
@@ -346,4 +469,4 @@ class InterviewService {
   }
 }
 
-module.exports = { InterviewService, cleanTranscript, worthAnalyzing, buildPrompt, parseAnswer, DEFAULT_CONTEXT };
+module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, buildSystemPrompt, buildTurn, parseAnswer, DEFAULT_CONTEXT };

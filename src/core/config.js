@@ -128,7 +128,11 @@ const DEFAULT_CONFIG = {
   // Modo entrevista (bandeja → Modo entrevista ou Ctrl+Alt+E): ouve o áudio do PC, transcreve em inglês
   // e mostra tópicos de resposta para cada pergunta. Currículo e vaga ficam em %APPDATA%\Ohara\entrevista\contexto.md.
   interview: {
-    whisperModel: 'small', // small acerta bem o inglês (~3 s por trecho); base é mais rápido e erra mais
+    whisperModel: 'small', // small acerta bem o inglês; base é mais rápido e erra mais
+    // Subpasta da pasta do Whisper com outra build do whisper.cpp. Vazio = "bin" (CPU).
+    // "bin-cuda" = build CUDA do release oficial (whisper-bin-win-cuda-*-x64.zip): roda na placa NVIDIA, bem mais rápido.
+    whisperBinDir: '',
+    mergeWindowMs: 3000, // fala que começa até 3 s depois da anterior = continuação da mesma pergunta
     model: 'haiku', // modelo do Claude para os tópicos (rápido)
     minWords: 4, // fala menor que isso, sem cara de pergunta, não chama a IA
     historyLines: 14, // falas anteriores mandadas junto, para entender perguntas de continuação
