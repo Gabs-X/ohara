@@ -5,6 +5,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { psLiteral } = require('./ps');
 
 const GB = 1024 ** 3;
 const gb = (n) => Math.round((Number(n) / GB) * 10) / 10;
@@ -140,7 +141,7 @@ function findBrowsers(env = process.env, exists = fs.existsSync) {
 async function navegadores({ run = psJson, find = findBrowsers } = {}) {
   const found = find();
   const names = [...new Set(BROWSERS.map((b) => b.proc))].map((p) => `'${p}'`).join(',');
-  const exes = found.map((b) => `'${b.exe.replace(/'/g, "''")}'`).join(',');
+  const exes = found.map((b) => psLiteral(b.exe)).join(',');
   const r = await run(`$v = @{}
 foreach ($e in @(${exes})) { $v[$e] = (Get-Item $e).VersionInfo.ProductVersion }
 $p = @(Get-Process -Name ${names} | Group-Object ProcessName | ForEach-Object {

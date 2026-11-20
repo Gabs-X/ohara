@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const { psLiteral } = require('../core/ps');
 
 function findWhisperExe(root) {
   const found = { cli: null, main: null };
@@ -180,7 +181,7 @@ class Whisper {
           await this.#download(await this.#latestZipUrl(), zip, (p) => onProgress?.({ step: 'programa', pct: p }));
           // Extrai numa pasta própria (arquivo baixado = não confiável: nada roda de dentro dela além do exe).
           await new Promise((resolve, reject) =>
-            execFile('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zip}' -DestinationPath '${this.#binDir()}' -Force`], { windowsHide: true }, (err) => (err ? reject(err) : resolve())),
+            execFile('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath ${psLiteral(zip)} -DestinationPath ${psLiteral(this.#binDir())} -Force`], { windowsHide: true }, (err) => (err ? reject(err) : resolve())),
           );
           fs.rmSync(zip, { force: true });
         }

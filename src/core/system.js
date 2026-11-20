@@ -2,6 +2,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { psLiteral } = require('./ps');
 
 let ttsProc = null;
 
@@ -27,7 +28,7 @@ function speak(text, voice) {
   const script = `
 Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
-try { $s.SelectVoice('${String(voice).replace(/'/g, "''")}') } catch {}
+try { $s.SelectVoice(${psLiteral(voice)}) } catch {}
 $t = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64}'))
 $s.Speak($t)`;
   ttsProc = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
