@@ -52,6 +52,7 @@ const DEFAULT_CONFIG = {
     model: 'qwen2.5:14b',
     timeoutSec: 180,
     contextTokens: 16384, // janela de contexto (o padrão do Ollama é pequeno para buscas em reuniões)
+    tools: true, // Ohara-AI consulta o PC sozinha (disco, memória, processos, navegadores, programas, rede, pastas); só leitura
   },
 
   // Orca: o chat da Ohara roda no modelo local; o que exige o Claude (código, comandos, pesquisa)

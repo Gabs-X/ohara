@@ -366,3 +366,28 @@ test('decisão do modelo local falhou (null): segue a regra fixa e responde no c
   localCalls[0].finish();
   assert.equal((await p).provider, 'ollama');
 });
+
+test('consulta do PC (armazenamento, navegadores) fica com a Ohara-AI, sem perguntar ao roteador nem abrir o Orca', async () => {
+  for (const text of ['verifica quanto tenho de armazenamento', 'quais navegadores eu tenho instalados?', 'analisa o que está pesando na memória do pc']) {
+    const { o } = setup();
+    const chat = o.create(WORK);
+    verdict = { acao: 'claude', tarefa: 'verificar o PC' }; // mesmo que o roteador local errasse
+    const p = o.send(chat.id, { text, runId: 'pc1' });
+    await tick();
+    assert.equal(localCalls.length, 1, text);
+    localCalls[0].finish();
+    const msg = await p;
+    assert.equal(msg.provider, 'ollama', text);
+    assert.equal(decideCalls.length, 0, text);
+    assert.equal(orcaCalls.length, 0, text);
+    assert.ok(msg.route.reasons.some((r) => /consulta do PC/.test(r)), text);
+  }
+});
+
+test('usar um site no navegador continua indo para o Claude', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const q = await o.send(chat.id, { text: 'abre o linkedin no chrome e procura vagas', runId: 'pc2' });
+  assert.match(q.text, /ImLaw/);
+  assert.equal(localCalls.length, 0);
+});

@@ -7,6 +7,7 @@ const { chatLocal, decideLocal } = require('./local-chat');
 const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
+const { asksPcInfo } = require('./pc-tools');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
 const { wantsBrowser, needsBrowser, chromeNote, chromeIssueNote, findChrome, CODEX_BROWSER_NOTE } = require('../integrations/chrome');
@@ -261,8 +262,10 @@ class Orchestrator {
       previous: this.#previousCategory(chat),
     });
     const continued = (base.reasons || []).some((r) => /continua o assunto/.test(r)) && !!chat?.messages.some((m) => m.route?.provider === 'orca');
-    const toAgent = (AGENT_CATEGORIES.has(base.category) && (ACTION_RE.test(normalize(text)) || continued)) || (config.claude?.chrome !== false && needsBrowser(text));
-    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : 'conversa: modelo local'];
+    // Só consulta o PC (espaço, memória, navegadores instalados...): a Ohara-AI lê sozinha, sem o Claude.
+    const pcInfo = config.ollama?.tools !== false && asksPcInfo(text);
+    const toAgent = !pcInfo && ((AGENT_CATEGORIES.has(base.category) && (ACTION_RE.test(normalize(text)) || continued)) || (config.claude?.chrome !== false && needsBrowser(text)));
+    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : pcInfo ? 'consulta do PC: a Ohara-AI lê sozinha' : 'conversa: modelo local'];
     return toAgent
       ? { ...base, provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined, reasons }
       : { ...base, provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined, reasons };
@@ -333,7 +336,7 @@ class Orchestrator {
     if (decision.provider === 'ollama' && !improvement && !answered && !images.length && (!override || override === 'auto')) {
       const explicit = isHandoff(normalize(text));
       // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
-      const skip = config.ollama?.decide === false || (!!this.whatsappWeb && wantsWhatsApp(text));
+      const skip = config.ollama?.decide === false || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && asksPcInfo(text));
       const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text });
       if (explicit || verdict?.acao === 'claude') {
         handoff = { task: verdict?.tarefa || '' };
