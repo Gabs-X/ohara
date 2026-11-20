@@ -1,13 +1,29 @@
 /* global central, esc, toast, callSafe */
 // Tela "Ajustes": integrações (agenda, GitHub, Slack), voz, atalhos, reuniões e geral.
 
+let settingsUpdOff = null;
+
+// Texto do estado da atualização. `checked`: o usuário acabou de pedir a verificação ("idle" = já está na última).
+function updateText(s, checked) {
+  switch (s?.status) {
+    case 'unsupported': return 'A atualização automática só funciona na Ohara instalada (não no portátil nem em desenvolvimento).';
+    case 'checking': return 'Procurando versão nova…';
+    case 'downloading': return `Versão ${s.version} encontrada. Baixando${s.percent ? ` (${s.percent}%)` : ''}… o botão para instalar aparece quando terminar.`;
+    case 'ready': return `Versão ${s.version} baixada e pronta para instalar.`;
+    case 'error': return `Não consegui verificar: ${s.message || 'erro desconhecido'}. Confira a internet e tente de novo.`;
+    default: return checked ? 'Você já está na versão mais recente.' : '';
+  }
+}
+
 async function renderSettings() {
-  const [cfg, hk, cal, sl, login] = await Promise.all([
+  const [cfg, hk, cal, sl, login, version, upd] = await Promise.all([
     central.getConfig(),
     central.hotkeyStatus(),
     central.calendarStatus(),
     central.slackStatus(),
     central.loginItem(),
+    central.appVersion().catch(() => '?'),
+    central.updateState().catch(() => ({ status: 'error', message: 'não consegui ler o estado da atualização' })),
   ]);
   const body = document.getElementById('settings-body');
   const ok = (good, text) => `<span class="status ${good ? 'good' : 'bad'}">${good ? '●' : '○'} ${esc(text)}</span>`;
@@ -94,6 +110,13 @@ async function renderSettings() {
       <label class="check"><input type="checkbox" id="m-on" ${cfg.meetings.enabled ? 'checked' : ''}> Monitorar a pasta</label>
       <label class="check"><input type="checkbox" id="m-auto" ${cfg.meetings.autoAnalyze ? 'checked' : ''}> Analisar automaticamente cada reunião nova (gasta cota do Claude; desligado, você pede a análise na reunião)</label>
       <button class="btn small-btn" id="m-save">Salvar</button>
+    </section>
+
+    <section class="section">
+      <h2>🔄 Atualizações</h2>
+      <p class="muted small">Versão instalada: <b>v${esc(version)}</b>. A Ohara procura versões novas sozinha ao abrir e a cada 4 horas; aqui você confere na hora.</p>
+      <div class="row"><button class="btn small-btn" id="upd-check" ${upd.status === 'unsupported' ? 'disabled' : ''}>Verificar atualizações</button><button class="btn small-btn" id="upd-install" ${upd.status === 'ready' ? '' : 'hidden'}>Reiniciar e atualizar</button></div>
+      <p id="upd-result" class="small" role="status">${esc(updateText(upd, false))}</p>
     </section>
 
     <section class="section">
@@ -203,6 +226,30 @@ async function renderSettings() {
       },
     }),
   );
+
+  // Atualizações
+  const showUpd = (s, checked) => {
+    $s('#upd-result').textContent = updateText(s, checked);
+    $s('#upd-install').hidden = s?.status !== 'ready';
+  };
+  $s('#upd-check').addEventListener('click', async () => {
+    const button = $s('#upd-check');
+    button.disabled = true;
+    $s('#upd-result').textContent = 'Procurando versão nova…';
+    try {
+      showUpd(await central.updateCheck(), true);
+    } catch (err) {
+      showUpd({ status: 'error', message: err.message }, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $s('#upd-install').addEventListener('click', () => central.updateInstall());
+  // Acompanha o download até o fim (a tela é redesenhada a cada abertura: troca a inscrição anterior).
+  if (typeof settingsUpdOff === 'function') settingsUpdOff();
+  settingsUpdOff = central.onUpdateStatus((s) => {
+    if (body.contains($s('#upd-result'))) showUpd(s, true);
+  });
 
   // Geral
   $s('#g-login').addEventListener('change', (e) => central.loginItem(e.target.checked));
