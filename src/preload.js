@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld('central', {
   checkDevelopment: inv('development:check'),
   hotkeyStatus: inv('hotkeys:status'),
   appVersion: inv('app:version'),
+  updateState: inv('update:state'),
+  updateCheck: inv('update:check'),
+  updateInstall: inv('update:install'),
+  onUpdateStatus: on('update:status'),
 
   // Conversas
   listChats: inv('chats:list'),

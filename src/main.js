@@ -177,6 +177,10 @@ const usage = new UsageTracker(usageStore);
 usage.codexOn = () => config.codex?.enabled === true;
 
 // Envia para todas as janelas (principal e rápida).
+// Atualização automática (só no instalado; no portátil e em desenvolvimento fica desligada).
+const { startUpdater } = require('./updater');
+let updater = { state: () => ({ status: 'unsupported' }), check: async () => ({ status: 'unsupported' }), install() {} };
+
 const send = (channel, payload) => {
   for (const w of [win, quick, listeningIndicator, interviewWin]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
 };
@@ -858,6 +862,9 @@ function registerIpc() {
   // Configuração
   handle('config:get', () => publicConfig());
   handle('app:version', () => app.getVersion());
+  handle('update:state', () => updater.state());
+  handle('update:check', () => updater.check());
+  handle('update:install', () => updater.install());
   handle('config:set', (partial) => updateConfig(partial));
   handle('development:check', () => require('./core/development').checkDevelopment({
     repo: config.selfRepo,
@@ -1055,6 +1062,7 @@ app.whenReady().then(() => {
   enableAutoStartOnce();
   setTimeout(() => cleanupOldVersionsOnce().catch(() => {}), 5000);
   registerIpc();
+  updater = startUpdater({ send, notify });
   createWindow();
   createQuick();
   if (process.env.CENTRAL_INTERVIEW_TEST) toggleInterview();

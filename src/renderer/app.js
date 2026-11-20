@@ -50,7 +50,7 @@ const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/
 const fmtNum = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
 
 function providerTag(msg) {
-  const name = { codex: 'Codex', local: 'Ohara', ollama: 'Local', orca: 'Orca' }[msg.provider] || 'Claude';
+  const name = { codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[msg.provider] || 'Claude';
   return `<span class="tag ${msg.provider}">${name} · ${escapeHtml(msg.model || '')}</span>`;
 }
 
@@ -317,7 +317,7 @@ function schedulePreview() {
     const text = el.input.value.trim();
     if (!text) { el.badge.hidden = true; return; }
     const r = await central.previewRoute(text, { hasImage: state.attachments.length > 0, override: el.model.value, chatId: state.chatId });
-    const name = { codex: 'Codex', local: 'Ohara', ollama: 'Local', orca: 'Orca' }[r.provider] || 'Claude';
+    const name = { codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[r.provider] || 'Claude';
     el.badge.innerHTML = `→ <b class="${r.provider}">${name} ${escapeHtml(r.model)}</b> · ${escapeHtml(r.label)}${r.reasons.length > 1 ? ` · ${escapeHtml(r.reasons.slice(1).join(' · '))}` : ''}`;
     el.badge.title = r.reasons.join('\n');
     el.badge.hidden = false;
@@ -599,6 +599,19 @@ async function newChatWithPrompt(text, { cwd, send = false, override } = {}) {
 (async function init() {
   state.config = await central.getConfig();
   central.appVersion().then((v) => { document.getElementById('app-version').textContent = 'v' + v; });
+  // Versão nova: avisa enquanto baixa e oferece reiniciar quando estiver pronta.
+  const showUpdate = (s) => {
+    const banner = document.getElementById('update-banner');
+    const btn = document.getElementById('update-install');
+    const txt = document.getElementById('update-text');
+    if (s?.status === 'downloading') txt.textContent = `Baixando a versão ${s.version}${s.percent ? ` (${s.percent}%)` : ''}…`;
+    else if (s?.status === 'ready') txt.textContent = `Versão ${s.version} pronta para instalar.`;
+    banner.hidden = !['downloading', 'ready'].includes(s?.status);
+    btn.hidden = s?.status !== 'ready';
+  };
+  document.getElementById('update-install').onclick = () => central.updateInstall();
+  central.onUpdateStatus(showUpdate);
+  central.updateState().then(showUpdate).catch(() => {});
   el.speak.checked = !!state.config.voice.speakReplies;
   applyCodex();
   await loadRepos();

@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const { route, classify, learnPreferences, normalize } = require('./router');
-const { chatLocal } = require('./local-chat');
+const { chatLocal, decideLocal } = require('./local-chat');
 const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
@@ -51,7 +51,12 @@ const PARALLEL_NOTE =
 
 // Categorias que exigem ferramentas: só vão para o Claude (no Orca) quando o pedido é uma ação.
 const AGENT_CATEGORIES = new Set(['codigo', 'codigo_complexo', 'sistema', 'pesquisa']);
-const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[ae]\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
+const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[aei]\w*|abert\w*|encaminh\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
+// Pedido explícito para o Claude/Orca ("encaminhe ao Claude", "abre o Orca", "era pra ter aberto o Orca"):
+// vai sem depender do modelo local acertar.
+const HANDOFF_TARGET_RE = /\b(claude|orca)\b/;
+const HANDOFF_VERB_RE = /\b(encaminh\w*|mand\w*|pass\w*|envi\w*|cham\w*|abr\w*|abert\w*|usa\w*|use|usar|segu\w*|faz\w*|fac\w*|leva\w*|joga\w*|deleg\w*|pede|pedir|resolv\w*|continu\w*)\b/;
+const isHandoff = (plain) => HANDOFF_TARGET_RE.test(plain) && HANDOFF_VERB_RE.test(plain);
 const MAX_CONTEXT_CHARS = 9000;
 const DRAFT_STATUS = { pending: 'aguardando confirmação', sending: 'enviando', sent: 'enviada', error: 'falhou', cancelled: 'cancelada' };
 const DRAFT_TTL = 30 * 60_000; // "confirmado" vale para rascunhos de até 30 min atrás
@@ -306,6 +311,20 @@ class Orchestrator {
 
     const decision = this.#route(chat, text, { hasImage: images.length > 0, override });
     if (improvement || answered) Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
+    // Ficaria no chat local: antes, a Ohara-AI relê a conversa e decide se é tarefa para o Claude
+    // ("pode seguir" depois de combinar uma alteração, "encaminhe ao Claude"). Não gasta cota, então sempre vale.
+    let handoff = null;
+    if (decision.provider === 'ollama' && !improvement && !answered && !images.length && (!override || override === 'auto')) {
+      const explicit = isHandoff(normalize(text));
+      // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
+      const skip = config.ollama?.decide === false || (!!this.whatsappWeb && wantsWhatsApp(text));
+      const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text });
+      if (explicit || verdict?.acao === 'claude') {
+        handoff = { task: verdict?.tarefa || '' };
+        Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
+        decision.reasons = [...(decision.reasons || []), explicit ? 'pediu para mandar ao Claude' : 'a Ohara-AI leu a conversa: é tarefa para o Claude'];
+      }
+    }
     if (source === 'voice' && decision.provider === 'claude' && VOICE_FAST.has(decision.category) && (!override || override === 'auto')) {
       Object.assign(decision, { tier: 'rapido', model: config.claude.models.rapido, effort: 'low' });
       decision.reasons = [...(decision.reasons || []), 'conversa por voz: modelo rápido'];
@@ -362,9 +381,17 @@ class Orchestrator {
     let result;
     try {
       if (decision.provider === 'orca') {
-        const request = answered ? answered.pending.request : improvement ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}` : text;
+        const request = answered
+          ? answered.pending.request
+          : improvement
+            ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}`
+            : handoff
+              ? [handoff.task ? `Tarefa (resumida pela Ohara a partir da conversa): ${handoff.task}` : 'Faça a tarefa combinada na conversa recente.', `Última mensagem dele: ${text}`].join('\n')
+              : text;
         const account = answered?.account || parseAccount(text);
-        result = await this.#toOrca({ chat, config, text: answered ? answered.pending.text : text, request, cwd, userIndex, onEvent, assistant, account });
+        // O nome do console e da branch saem da tarefa, não de "pode seguir".
+        const label = answered ? answered.pending.text : handoff?.task || text;
+        result = await this.#toOrca({ chat, config, text: label, request, cwd, userIndex, onEvent, assistant, account, withContext: !!handoff });
       } else {
         result = await chatLocal({
           config,
@@ -373,6 +400,7 @@ class Orchestrator {
           project: cwd ? path.basename(cwd) : null,
           signal: ac.signal,
           onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+          onStep: (t) => onEvent({ kind: 'tool', text: t }),
         });
       }
     } catch (err) {
@@ -421,7 +449,7 @@ class Orchestrator {
   }
 
   // Abre o Orca no projeto, na branch da tarefa, com o Claude já recebendo o pedido e o contexto.
-  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null }) {
+  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null, withContext = false }) {
     const general = config.orca?.generalDir || config.defaultCwd;
     const dir = cwd && fs.existsSync(cwd) ? cwd : general;
     const key = path.resolve(dir).toLowerCase();
@@ -450,8 +478,9 @@ class Orchestrator {
       }
       browserNote = [chromeNote(findChrome()), issue ? chromeIssueNote(issue) : ''].filter(Boolean).join('\n');
     }
+    // Console já aberto: manda só o pedido; se o pedido vem da conversa ("pode seguir"), leva a conversa junto.
     const parts = state && state.terminal
-      ? [request]
+      ? [withContext && recent ? `Conversa recente com a Ohara:\n${recent}\n` : '', request]
       : [
           'Você foi aberto pela Ohara, assistente pessoal do Gabriel, para fazer esta tarefa. Responda em português do Brasil.',
           `Pasta do projeto: ${dir}${dir === general ? ` (nenhum projeto definido; os repositórios ficam em ${config.workspaceRoot})` : ''}.`,

@@ -94,7 +94,7 @@ async function send(text) {
 central.onRoute(({ chatId, route }) => {
   if (chatId !== st.chatId) return;
   q.route.hidden = false;
-  q.route.innerHTML = `→ <b class="${route.provider}">${{ codex: 'Codex', local: 'Ohara', ollama: 'Local', orca: 'Orca' }[route.provider] || 'Claude'} ${escq(route.model)}</b> · ${escq(route.label)}`;
+  q.route.innerHTML = `→ <b class="${route.provider}">${{ codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[route.provider] || 'Claude'} ${escq(route.model)}</b> · ${escq(route.label)}`;
   fit();
 });
 

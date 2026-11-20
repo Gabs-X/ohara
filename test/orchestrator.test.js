@@ -22,7 +22,14 @@ stub('core/local-chat', {
     if (opts.signal?.aborted) throw new Error('abortado');
     return { provider: 'ollama', model: 'qwen-teste', text: call.answer ?? `resposta: ${opts.text}`, tokens: {} };
   },
+  // Decisão da Ohara-AI: por padrão "conversar"; o teste troca o veredito.
+  decideLocal: async (opts) => {
+    decideCalls.push(opts);
+    return verdict;
+  },
 });
+const decideCalls = [];
+let verdict = { acao: 'conversar', tarefa: '' };
 stub('integrations/orca', {
   sendToOrca: async (opts) => {
     orcaCalls.push(opts);
@@ -47,6 +54,8 @@ function setup(extra = {}) {
   localCalls.length = 0;
   orcaCalls.length = 0;
   orcaFail = null;
+  decideCalls.length = 0;
+  verdict = { acao: 'conversar', tarefa: '' };
   const events = [];
   const store = (data) => ({ data, save() {} });
   const usage = { updateClaudeLimits() {}, summary: () => ({}), record() {}, refreshCodexLimits() {}, limits: () => ({}), current: () => ({}) };
@@ -280,4 +289,60 @@ test('continuar no console aberto não pergunta a conta de novo', async () => {
   const again = await o.send(chat.id, { text: 'agora ajusta também a tela de ajustes da ohara', runId: 'd2' });
   assert.equal(orcaCalls.length, 2);
   assert.match(again.text, /já está trabalhando/);
+});
+
+test('"encaminhe ao Claude" vai para o Orca mesmo sem verbo de código, com a tarefa lida da conversa', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const p1 = o.send(chat.id, { text: 'ando pensando em mudar uns critérios', runId: 'e1' });
+  await tick();
+  localCalls[0].finish();
+  await p1;
+  verdict = { acao: 'conversar', tarefa: 'Ajustar a rotina de vagas para aceitar vagas com até 2 lacunas obrigatórias' };
+  const msg = await sendOrca(o, chat.id, 'encaminhe ao Claude', 'e2');
+  assert.equal(msg.provider, 'orca');
+  assert.equal(orcaCalls.length, 1);
+  assert.match(orcaCalls[0].prompt, /até 2 lacunas obrigatórias/);
+  assert.match(orcaCalls[0].request, /rotina de vagas/, 'o nome do console sai da tarefa, não de "encaminhe"');
+  assert.equal(localCalls.length, 1, 'não chamou o modelo local para responder');
+});
+
+test('"pode seguir" depois de combinar uma tarefa: a Ohara-AI decide e abre o Orca', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  verdict = { acao: 'claude', tarefa: 'Expandir a busca de vagas e coletar mais vagas por rodada' };
+  const msg = await sendOrca(o, chat.id, 'pode seguir', 'g1');
+  assert.equal(msg.provider, 'orca');
+  assert.match(orcaCalls[0].prompt, /Expandir a busca de vagas/);
+  assert.match(orcaCalls[0].prompt, /Última mensagem dele: pode seguir/);
+  assert.equal(localCalls.length, 0);
+});
+
+test('"era pra vc ter aberto um terminal no Orca" também conta como pedido explícito', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const q = await o.send(chat.id, { text: 'era pra vc ter aberto um terminal no Orca com o claude', runId: 'x1' });
+  assert.match(q.text, /ImLaw/);
+  assert.equal(localCalls.length, 0);
+});
+
+test('pergunta sobre o Claude sem pedir ação fica na conversa', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'qual a diferença entre o claude opus e o sonnet?', runId: 'c1' });
+  await tick();
+  assert.equal(localCalls.length, 1);
+  localCalls[0].finish();
+  assert.equal((await p).provider, 'ollama');
+  assert.equal(orcaCalls.length, 0);
+});
+
+test('decisão do modelo local falhou (null): segue a regra fixa e responde no chat', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  verdict = null;
+  const p = o.send(chat.id, { text: 'me explica o que é uma worktree', runId: 'n1' });
+  await tick();
+  localCalls[0].finish();
+  assert.equal((await p).provider, 'ollama');
 });

@@ -236,3 +236,9 @@ textarea { width: 100%; resize: none; border: 0; background: none; outline: none
 .improve-offer { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border: 1px dashed var(--accent); border-radius: 10px; font-size: 13px; }
 
 #btn-voice.rec { background: rgba(255, 92, 122, .25); border-color: rgba(255, 92, 122, .7); }
+
+/* Aviso de versão nova (atualização automática) */
+.update-banner { margin: 8px 0 4px; padding: 9px 10px; border: 1px solid var(--accent); border-radius: 10px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text); font-size: 12px; display: flex; flex-direction: column; gap: 7px; }
+.update-banner[hidden] { display: none; }
+.update-btn { align-self: flex-start; border: 0; border-radius: 8px; padding: 6px 10px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.update-btn:hover { filter: brightness(1.1); }
