@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { InterviewService, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, parseAnswer } = require('../src/core/interview');
+const { InterviewService, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, parseAnswer, similarity, findRepeat } = require('../src/core/interview');
 
 test('descarta alucinações do Whisper em silêncio', () => {
   assert.strictEqual(cleanTranscript('[BLANK_AUDIO]'), '');
@@ -34,14 +34,40 @@ test('o perfil vai uma vez no prompt de sistema; cada pergunta leva só o histó
   assert.match(buildTurn({ history: [], latest: 'x', continuation: true }), /continuation="true"/);
 });
 
-test('lê a resposta completa, parcial e o NONE', () => {
+test('lê a resposta completa, parcial, o NONE e o SAME', () => {
   assert.deepStrictEqual(parseAnswer('NONE'), { none: true });
+  assert.deepStrictEqual(parseAnswer('SAME'), { same: true });
   assert.deepStrictEqual(parseAnswer('NO'), { pending: true });
+  assert.deepStrictEqual(parseAnswer('SA'), { pending: true });
   assert.deepStrictEqual(parseAnswer(''), { pending: true });
-  const r = parseAnswer('PT: Fale sobre você\n- Full stack developer, 3 years\n- **React** and Node\n  at Eletrozema\n- Fast learner');
-  assert.strictEqual(r.questionPt, 'Fale sobre você');
-  assert.deepStrictEqual(r.bullets, ['Full stack developer, 3 years', 'React and Node at Eletrozema', 'Fast learner']);
-  assert.deepStrictEqual(parseAnswer('PT: Por que esta empresa?\n- Global').bullets, ['Global']);
+  const r = parseAnswer('PT: Há quanto tempo usa React?\nSAY: **Four years** with React. Three at Zema.\nKEYS: Zema · Next.js · iRose · extra');
+  assert.deepStrictEqual(r, { questionPt: 'Há quanto tempo usa React?', say: 'Four years with React. Three at Zema.', keys: ['Zema', 'Next.js', 'iRose'] });
+  // pela metade: o rótulo da próxima linha ainda chegando não entra na frase
+  assert.deepStrictEqual(parseAnswer('PT: Fale de você\nSAY: Full stack dev\nKE'), { questionPt: 'Fale de você', say: 'Full stack dev', keys: [] });
+  // formato antigo (tópicos) ainda vira frase + palavras-chave
+  assert.deepStrictEqual(parseAnswer('PT: Por que esta empresa?\n- Global clients\n- Growth'), { questionPt: 'Por que esta empresa?', say: 'Global clients', keys: ['Growth'] });
+});
+
+test('o prompt pede uma frase de até 8 palavras, 2 ou 3 palavras-chave e SAME para pergunta repetida', () => {
+  const sys = buildSystemPrompt('x');
+  assert.match(sys, /SAY: .*MAX 8 WORDS/);
+  assert.match(sys, /KEYS: /);
+  assert.match(sys, /2 or 3 keywords/);
+  assert.match(sys, /exactly: SAME/);
+  assert.doesNotMatch(sys, /3 to 4 bullets/);
+});
+
+test('reconhece a mesma pergunta dita de outro jeito, sem confundir perguntas diferentes', () => {
+  assert.ok(similarity('Are you okay working as a contractor with exclusivity?', 'Sorry, so are you fine working as a contractor, with exclusivity?') >= 0.75);
+  assert.ok(similarity('Are you okay working as a contractor with exclusivity?', 'Do you have an MEI company?') < 0.3);
+  const cards = [
+    { id: 'a', original: 'Are you okay working as a contractor with exclusivity?', say: 'Yes, contractor is fine.' },
+    { id: 'b', original: 'How many years of experience do you have with React and TypeScript?', say: 'Four years.' },
+  ];
+  assert.strictEqual(findRepeat('So, are you fine working as a contractor with exclusivity?', cards)?.id, 'a');
+  assert.strictEqual(findRepeat('How many years do you have with React and TypeScript, sorry?', cards)?.id, 'b');
+  assert.strictEqual(findRepeat('How many years of experience do you have with Node and AWS?', cards), null);
+  assert.strictEqual(findRepeat('Tell me about your hardest project', [{ id: 'c', original: 'Tell me about your last project', say: 'x' }]), null);
 });
 
 // Claude falso: responde com o texto que o teste mandar (ou NONE) e registra as mensagens.
@@ -113,7 +139,7 @@ test('usa o whisper-server quando ele sobe e para ele no fim', async () => {
 });
 
 test('fim de fala manda ao Claude tudo o que foi dito e mostra o cartão com o tempo', async () => {
-  const { svc, events, sent } = fakeService(['So tell me about', 'a hard bug you fixed.'], ['PT: Fale de um bug difícil\n- IIS CPU issue\n- Logs\n- Fixed']);
+  const { svc, events, sent } = fakeService(['So tell me about', 'a hard bug you fixed.'], ['PT: Fale de um bug difícil\nSAY: IIS server at full CPU.\nKEYS: Logs · Fixed']);
   await svc.start();
   svc.addAudio(new Uint8Array([1]), { turnEnd: false });
   svc.addAudio(new Uint8Array([2]), { turnEnd: false });
@@ -123,14 +149,16 @@ test('fim de fala manda ao Claude tudo o que foi dito e mostra o cartão com o t
   assert.match(sent[0], /<latest_interviewer_speech>\nSo tell me about a hard bug you fixed\.\n/);
   const done = cardsOf(events).find((c) => c.state === 'done');
   assert.strictEqual(done.questionPt, 'Fale de um bug difícil');
-  assert.deepStrictEqual(done.bullets, ['IIS CPU issue', 'Logs', 'Fixed']);
+  assert.strictEqual(done.say, 'IIS server at full CPU.');
+  assert.deepStrictEqual(done.keys, ['Logs', 'Fixed']);
+  assert.match(fs.readFileSync(svc.logFile, 'utf8'), /> \*\*Diga:\*\* IIS server at full CPU\.\n> _Logs · Fixed_/);
   assert.ok(Number.isFinite(done.ms));
   assert.strictEqual(svc.pending, '');
   svc.stop();
 });
 
 test('continuação logo depois de uma pausa curta atualiza o mesmo cartão', async () => {
-  const { svc, events, sent } = fakeService(['Tell me about a project', 'that you are proud of.'], ['PT: Fale de um projeto\n- A', 'PT: Fale de um projeto do qual se orgulha\n- B']);
+  const { svc, events, sent } = fakeService(['Tell me about a project', 'that you are proud of.'], ['PT: Fale de um projeto\nSAY: A', 'PT: Fale de um projeto do qual se orgulha\nSAY: B']);
   await svc.start();
   svc.addAudio(new Uint8Array([1]), { turnEnd: true });
   await settle();
@@ -141,7 +169,7 @@ test('continuação logo depois de uma pausa curta atualiza o mesmo cartão', as
   assert.strictEqual(done.length, 2);
   assert.strictEqual(done[0].id, done[1].id);
   assert.strictEqual(svc.cards.length, 1);
-  assert.deepStrictEqual(svc.cards[0].bullets, ['B']);
+  assert.strictEqual(svc.cards[0].say, 'B');
   svc.stop();
 });
 
@@ -166,7 +194,7 @@ test('fala curta sem pergunta nem chama a IA', async () => {
 });
 
 test('Parar → Começar continua a mesma entrevista e o Claude novo recebe tudo o que veio antes', async () => {
-  const { svc, sent } = fakeService(['Tell me about yourself please.', 'And why React?'], ['PT: Fale de você\n- Dev at Zema', 'PT: Por que React?\n- Typed UI']);
+  const { svc, sent } = fakeService(['Tell me about yourself please.', 'And why React?'], ['PT: Fale de você\nSAY: Dev at Zema\nKEYS: React', 'PT: Por que React?\nSAY: Typed UI']);
   let sessions = 0;
   const make = svc.createSession;
   svc.createSession = (o) => {
@@ -190,7 +218,7 @@ test('Parar → Começar continua a mesma entrevista e o Claude novo recebe tudo
   await settle();
   assert.strictEqual(sessions, 2);
   assert.doesNotMatch(sent[0], /earlier_in_this_interview/);
-  assert.match(sent[1], /<earlier_in_this_interview>[\s\S]*Q: Tell me about yourself please\.\nSuggested: Dev at Zema/);
+  assert.match(sent[1], /<earlier_in_this_interview>[\s\S]*Q: Tell me about yourself please\.\nSuggested: Dev at Zema \(React\)/);
   assert.match(fs.readFileSync(log, 'utf8'), /_Retomada às/);
   svc.newInterview();
   assert.strictEqual(svc.lines.length, 0);
@@ -202,7 +230,7 @@ test('Parar → Começar continua a mesma entrevista e o Claude novo recebe tudo
 test('a sua fala (microfone) vai para a transcrição como "Eu", nunca vira pergunta e entra no histórico do Claude', async () => {
   const { svc, sent } = fakeService(
     ['Tell me about your last project.', 'I built a React dashboard with TypeScript at Triforce.', 'Tell me about your last project.', 'Why did you choose React for it?'],
-    ['PT: Fale do último projeto\n- Dashboard', 'PT: Por que React?\n- Typed UI'],
+    ['PT: Fale do último projeto\nSAY: Dashboard', 'PT: Por que React?\nSAY: Typed UI'],
   );
   await svc.start();
   svc.addAudio(new Uint8Array([1]), { turnEnd: true });
@@ -231,7 +259,7 @@ test('eco: fala do microfone repetindo quem entrevista é descartada', () => {
 test('depois que você responde, a fala seguinte de quem entrevista é pergunta nova (não continuação)', async () => {
   const { svc, events, sent } = fakeService(
     ['What is your experience with React?', 'Yes, I use it daily.', 'And what about testing frameworks?'],
-    ['PT: Experiência com React?\n- Daily', 'PT: E testes?\n- Jest'],
+    ['PT: Experiência com React?\nSAY: Daily', 'PT: E testes?\nSAY: Jest'],
   );
   await svc.start();
   svc.addAudio(new Uint8Array([1]), { turnEnd: true, startedAt: Date.now() });
@@ -242,6 +270,53 @@ test('depois que você responde, a fala seguinte de quem entrevista é pergunta 
   assert.doesNotMatch(sent[1], /continuation="true"/);
   const ids = new Set(cardsOf(events).filter((c) => c.state === 'done').map((c) => c.id));
   assert.strictEqual(ids.size, 2);
+  svc.stop();
+});
+
+test('pergunta repetida quase igual não chama o Claude nem cria cartão: o cartão antigo volta ao topo', async () => {
+  const { svc, events, sent } = fakeService(
+    ['Are you okay working as a contractor with exclusivity?', 'Sorry, I did not get it.', 'So, are you fine working as a contractor with exclusivity?'],
+    ['PT: Topa ser contractor com exclusividade?\nSAY: Yes, contractor is fine for me.\nKEYS: MEI · exclusivity'],
+  );
+  await svc.start();
+  svc.addAudio(new Uint8Array([1]), { turnEnd: true, startedAt: Date.now() });
+  await settle();
+  svc.addAudio(new Uint8Array([2]), { speaker: 'me', startedAt: Date.now() + 1000 });
+  svc.addAudio(new Uint8Array([3]), { turnEnd: true, startedAt: Date.now() + 2000 });
+  await settle();
+  assert.strictEqual(sent.length, 1);
+  assert.strictEqual(svc.cards.length, 1);
+  const shown = cardsOf(events);
+  assert.strictEqual(new Set(shown.map((c) => c.id)).size, 1);
+  assert.ok(Number.isFinite(shown.at(-1).repeatedAt));
+  assert.match(fs.readFileSync(svc.logFile, 'utf8'), /Pergunta repetida/);
+  svc.stop();
+});
+
+test('quando o Claude responde SAME, o cartão novo some e o antigo volta', async () => {
+  const { svc, events, sent } = fakeService(
+    ['How long have you been working with React?', 'Yes.', 'For how many years have you used React?', 'Okay and what about testing frameworks?'],
+    ['PT: Há quanto tempo usa React?\nSAY: Four years with React.\nKEYS: Zema', 'SAME', 'PT: E testes?\nSAY: Jest and Testing Library.'],
+  );
+  await svc.start();
+  svc.addAudio(new Uint8Array([1]), { turnEnd: true, startedAt: Date.now() });
+  await settle();
+  svc.addAudio(new Uint8Array([2]), { speaker: 'me', startedAt: Date.now() + 1000 });
+  svc.addAudio(new Uint8Array([3]), { turnEnd: true, startedAt: Date.now() + 2000 });
+  await settle();
+  assert.strictEqual(sent.length, 2);
+  const first = svc.cards[0];
+  assert.strictEqual(svc.cards.length, 1);
+  const shown = cardsOf(events);
+  const secondId = shown.find((c) => c.id !== first.id).id;
+  assert.strictEqual(shown.filter((c) => c.id === secondId).at(-1).state, 'dismissed');
+  assert.strictEqual(shown.at(-1).id, first.id);
+  assert.ok(shown.at(-1).repeatedAt);
+  // pergunta nova de verdade continua virando cartão novo
+  svc.addAudio(new Uint8Array([4]), { turnEnd: true, startedAt: Date.now() + 10_000 });
+  await settle();
+  assert.strictEqual(svc.cards.length, 2);
+  assert.strictEqual(svc.cards.at(-1).say, 'Jest and Testing Library.');
   svc.stop();
 });
 

@@ -1,6 +1,7 @@
 // Modo entrevista: ouve o áudio do PC (a voz de quem entrevista no Teams), transcreve em inglês com o
-// Whisper local e, a cada pergunta, pede ao Claude (modelo rápido) tópicos curtos de resposta baseados no
-// seu currículo e na vaga (contexto.md). O seu microfone também é transcrito, só para a transcrição salva
+// Whisper local e, a cada pergunta, pede ao Claude (modelo rápido) uma frase curta de resposta (até 8 palavras)
+// e 2 ou 3 palavras-chave, baseadas no seu currículo e na vaga (contexto.md). Pergunta repetida não vira
+// cartão novo: o cartão de antes volta para o topo. O seu microfone também é transcrito, só para a transcrição salva
 // (e o contexto do Claude) terem as suas respostas. Nada é gravado em áudio; só o texto vai para um .md.
 //
 // Velocidade: ao clicar em "Começar a ouvir", o whisper-server (modelo carregado uma vez) e um processo do
@@ -65,25 +66,30 @@ function buildSystemPrompt(context) {
     'If it does NOT ask anything (statements, the interviewer talking about the company, greetings that need no answer),',
     'reply with exactly: NONE',
     '',
-    'If it DOES, reply in exactly this format and nothing else:',
-    'PT: <the question translated to Brazilian Portuguese, one short line>',
-    '- <talking point in simple, natural spoken English>',
-    '- <talking point>',
-    '- <talking point>',
+    'If the LATEST speech only repeats or rephrases a question you ALREADY answered in this interview',
+    '(the interviewer asking the same thing again, e.g. because the candidate did not understand), reply with exactly: SAME',
+    'A follow-up that asks for more detail or about something new ("can you elaborate?", "and what about testing?") is NOT SAME.',
     '',
-    'Rules for the talking points:',
-    '- 3 to 4 bullets, max 14 words each, easy to say out loud for a non-native speaker (B1/B2 level vocabulary).',
-    '- Short spoken phrases, not full essays: the candidate glances at them while talking.',
-    '- First bullet = the direct answer. Use concrete facts from the profile (companies, projects, technologies, results).',
-    '- Behavioral questions: follow STAR briefly (situation, action, result).',
+    'If it DOES ask something new, reply in exactly this format and nothing else:',
+    'PT: <the question translated to Brazilian Portuguese, one short line>',
+    'SAY: <one sentence the candidate says right away, MAX 8 WORDS>',
+    'KEYS: <keyword> · <keyword> · <keyword>',
+    '',
+    'The candidate reads this live while listening to fast English, so it must be read in one glance:',
+    '- SAY = the direct answer: max 8 words, simple spoken English (B1 vocabulary), easy to say out loud for a non-native speaker.',
+    '  No long clauses. Two tiny sentences are fine ("Four years with React. Three at Zema.").',
+    '- KEYS = 2 or 3 keywords (1 to 3 words each) to keep talking after SAY: companies, projects, technologies, numbers.',
+    '  Separate them with " · ". Do not repeat what is already in SAY.',
+    '- Use concrete facts from the profile (companies, projects, technologies, results).',
+    '- Behavioral questions: SAY gives the situation and the result in short; KEYS give the main actions.',
     '- Never invent employers, dates, numbers, certifications or experience that is not in the profile.',
     '  Respect the dates in the profile exactly (e.g. a degree that ended is finished, a job that ended is past).',
     '  If the profile has nothing about it, give an honest answer (eager to learn, related experience).',
-    '- "How would you / how do you approach" questions: describe a confident, senior approach with industry best practices',
-    '  (that is knowledge, not a claim), then tie it to one real example from the profile. Only claim as experience what is in the profile.',
-    '- Every bullet is something the candidate says out loud. Never put notes or instructions to him in the bullets.',
+    '- "How would you / how do you approach" questions: SAY a confident approach with industry best practices',
+    '  (that is knowledge, not a claim) and put one real example from the profile in KEYS. Only claim as experience what is in the profile.',
+    '- SAY is something the candidate says out loud. Never put notes or instructions to him there.',
     '- Stay consistent with what you suggested earlier in this interview.',
-    '- No markdown besides the "- " bullets. No intro, no closing remarks.',
+    '- No markdown, no bullets, no intro, no closing remarks: only the PT, SAY and KEYS lines.',
     '',
     '<profile>',
     String(context || '(no profile provided)').trim(),
@@ -95,7 +101,7 @@ function buildSystemPrompt(context) {
 // mensagem leva tudo o que já aconteceu na entrevista, para as respostas continuarem coerentes.
 function buildEarlier({ lines, cards }) {
   if (!lines.length && !cards.length) return '';
-  const qa = cards.filter((c) => c.bullets?.length).map((c) => `Q: ${c.original}\nSuggested: ${c.bullets.join(' / ')}`);
+  const qa = cards.filter((c) => c.say).map((c) => `Q: ${c.original}\nSuggested: ${c.say}${c.keys?.length ? ` (${c.keys.join(' · ')})` : ''}`);
   return [
     '<earlier_in_this_interview>',
     'Everything said so far:',
@@ -119,22 +125,73 @@ function buildTurn({ history, latest, continuation = false, earlier = '' }) {
   ].join('\n');
 }
 
-// Lê a resposta (inclusive pela metade, enquanto chega em fluxo).
+const MAX_KEYS = 3;
+const splitKeys = (s) => String(s).split(/\s*[·•|,;]\s*/).map((k) => k.trim()).filter(Boolean).slice(0, MAX_KEYS);
+const clean = (s) => String(s).replace(/\*\*/g, '').replace(/^["“]|["”]$/g, '').trim();
+
+// Lê a resposta (inclusive pela metade, enquanto chega em fluxo): { questionPt, say, keys } | none | same | pending.
 function parseAnswer(text) {
   const s = String(text || '').trim();
   if (!s) return { pending: true };
   if (/^NONE\b/i.test(s)) return { none: true };
-  if ('NONE'.startsWith(s.toUpperCase())) return { pending: true }; // "NO" chegando
+  if (/^SAME\b/i.test(s)) return { same: true };
+  const up = s.toUpperCase();
+  if ('NONE'.startsWith(up) || 'SAME'.startsWith(up)) return { pending: true }; // "NO" / "SA" chegando
   const lines = s.split('\n').map((l) => l.trim()).filter(Boolean);
   let questionPt = '';
-  const bullets = [];
-  for (const l of lines) {
-    const pt = l.match(/^PT:\s*(.*)$/i);
-    if (pt) questionPt = pt[1].trim();
-    else if (/^[-*•]\s*/.test(l)) bullets.push(l.replace(/^[-*•]\s*/, '').replace(/\*\*/g, ''));
-    else if (bullets.length) bullets[bullets.length - 1] += ` ${l}`;
+  let say = '';
+  let keys = [];
+  let field = '';
+  lines.forEach((l, i) => {
+    const m = l.match(/^(PT|SAY|KEYS):\s*(.*)$/i);
+    if (m) {
+      field = m[1].toUpperCase();
+      if (field === 'PT') questionPt = m[2].trim();
+      else if (field === 'SAY') say = clean(m[2]);
+      else keys = splitKeys(clean(m[2]));
+    } else if (i === lines.length - 1 && /^(S|SA|SAY|K|KE|KEY|KEYS)$/i.test(l)) {
+      // rótulo da próxima linha chegando pela metade: espera
+    } else if (/^[-*•]\s*/.test(l)) {
+      // formato antigo (tópicos): o primeiro vira a frase, os outros viram palavras-chave
+      const b = clean(l.replace(/^[-*•]\s*/, ''));
+      if (!say) say = b;
+      else if (keys.length < MAX_KEYS) keys.push(b);
+    } else if (field === 'SAY') say = `${say} ${clean(l)}`.trim();
+    else if (field === 'KEYS') keys = splitKeys(`${keys.join(' · ')} · ${clean(l)}`);
+  });
+  return { questionPt, say, keys };
+}
+
+// Palavras que não dizem do que a pergunta trata (para achar a mesma pergunta dita de outro jeito).
+const STOP = new Set(('a an the and or but so to of in on at for with about from by as is are was were be been am do does did '
+  + 'have has had you your yours i me my we our us they them he she it its this that these those there here what which who '
+  + 'how when where why can could would will should may might just like okay ok well yes yeah right also any some please tell '
+  + 'me know let maybe actually really kind sort again sorry mean say said asking ask question fine good comfortable '
+  + 'many much more').split(' '));
+const contentWords = (s) => [...new Set(words(s).filter((w) => w.length > 1 && !STOP.has(w)))];
+
+/** Parecença entre duas falas (Dice nas palavras de conteúdo), de 0 a 1. */
+function similarity(a, b) {
+  const x = contentWords(a);
+  const y = new Set(contentWords(b));
+  if (!x.length || !y.size) return 0;
+  return (2 * x.filter((w) => y.has(w)).length) / (x.length + y.size);
+}
+
+/**
+ * Cartão já respondido que a fala nova repete (o entrevistador perguntou de novo). Só decide sozinho com
+ * falas de 3+ palavras de conteúdo e bem parecidas; o resto fica para o Claude (resposta SAME).
+ */
+function findRepeat(text, cards, { minScore = 0.75, minWords = 3 } = {}) {
+  if (contentWords(text).length < minWords) return null;
+  let best = null;
+  let bestScore = 0;
+  for (const c of cards) {
+    if (!c.say) continue;
+    const score = similarity(text, c.original);
+    if (score >= bestScore) { best = c; bestScore = score; }
   }
-  return { questionPt, bullets };
+  return bestScore >= minScore ? best : null;
 }
 
 const DEFAULT_CONTEXT = `# Contexto da entrevista
@@ -499,6 +556,18 @@ class InterviewService {
     this.#maybeAnalyze(true);
   }
 
+  /** Pergunta repetida: o mesmo cartão volta para o topo (sem cartão novo para ler). */
+  #showAgain(card, since = Date.now()) {
+    if (!card) return;
+    const at = Date.now();
+    const again = { ...card, state: 'done', repeatedAt: at };
+    this.cards = [...this.cards.filter((c) => c.id !== card.id), again]; // o último da lista é o mais recente
+    this.lastCard = { id: card.id, original: card.original, endedAt: at, since };
+    this.emit('interview:card', again);
+    this.#log(`> _Pergunta repetida (${card.questionPt || card.original}): mesmo cartão de antes._`);
+    if (this.active) this.#status('listening', 'Ouvindo o áudio do PC');
+  }
+
   async #analyze(spoken, since = Date.now()) {
     const s = this.settings;
     if (!this.session) {
@@ -514,6 +583,12 @@ class InterviewService {
     const answered = (this.mySpeechAt || 0) > prev?.since; // você já começou a responder depois da pergunta
     const continuation = !!prev && !answered && since - prev.endedAt < s.mergeWindowMs;
     const latest = continuation ? `${prev.original} ${spoken}` : spoken;
+    // Pergunta repetida, quase com as mesmas palavras: nem chama o Claude, só traz o cartão de volta.
+    const again = !continuation && findRepeat(latest, this.cards);
+    if (again) {
+      this.#showAgain(again, since);
+      return;
+    }
     const startedAt = Date.now();
     const card = { id: continuation ? prev.id : `c${startedAt}`, at: startedAt, original: latest, questionPt: '', bullets: [], state: 'thinking' };
     this.lastCard = { id: card.id, original: latest, endedAt: startedAt, since: continuation ? prev.since : since };
@@ -535,22 +610,33 @@ class InterviewService {
       if (p.none && !dismissedEarly) {
         dismissedEarly = true;
         this.emit('interview:card', { ...card, state: 'dismissed' });
-      } else if (!p.pending && !p.none) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
+      } else if (!p.pending && !p.none && !p.same) this.emit('interview:card', { ...card, ...p, state: 'streaming' });
     });
     this.analyzing = false;
 
     const parsed = parseAnswer(r.text);
     const finishedAt = Date.now();
+    const others = this.cards.filter((c) => c.id !== card.id && c.say);
     if (parsed.none) {
       if (!dismissedEarly) this.emit('interview:card', { ...card, state: 'dismissed' });
       this.lastCard.dismissed = true;
-    } else if (parsed.bullets?.length) {
+    } else if (parsed.same && (others.length || this.cards.some((c) => c.id === card.id))) {
+      // O Claude reconheceu a mesma pergunta dita de outro jeito: some o cartão novo e volta o antigo.
+      const target = findRepeat(latest, others, { minScore: 0, minWords: 0 }) || others.at(-1);
+      if (target) {
+        this.cards = this.cards.filter((c) => c.id !== card.id);
+        this.emit('interview:card', { ...card, state: 'dismissed' });
+        this.#showAgain(target, this.lastCard.since);
+      } else {
+        this.#showAgain(this.cards.find((c) => c.id === card.id), this.lastCard.since); // continuação da mesma pergunta
+      }
+    } else if (parsed.say) {
       const done = { ...card, ...parsed, state: 'done', ms: finishedAt - startedAt };
       const i = this.cards.findIndex((c) => c.id === done.id);
       if (i >= 0) this.cards[i] = done;
       else this.cards.push(done);
       this.emit('interview:card', done);
-      this.#log(`> **Pergunta:** ${done.questionPt}\n${done.bullets.map((b) => `> - ${b}`).join('\n')}`);
+      this.#log(`> **Pergunta:** ${done.questionPt}\n> **Diga:** ${done.say}${done.keys.length ? `\n> _${done.keys.join(' · ')}_` : ''}`);
     } else if (r.error) {
       const done = { ...card, state: 'error', error: r.error };
       this.cards.push(done);
@@ -566,4 +652,4 @@ class InterviewService {
   }
 }
 
-module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, buildEarlier, parseAnswer, DEFAULT_CONTEXT };
+module.exports = { InterviewService, ClaudeSession, cleanTranscript, worthAnalyzing, isEcho, buildSystemPrompt, buildTurn, buildEarlier, parseAnswer, similarity, findRepeat, DEFAULT_CONTEXT };

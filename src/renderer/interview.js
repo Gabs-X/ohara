@@ -198,22 +198,41 @@ function renderCard(c) {
     return;
   }
   $('empty')?.remove();
-  if (!node) {
+  const isNew = !node;
+  const again = c.repeatedAt && node && node.dataset.repeatedAt !== String(c.repeatedAt);
+  if (isNew) {
     node = el('article', 'card');
     cards.set(c.id, node);
+  }
+  if (isNew || again) {
+    // Cartão novo, ou pergunta repetida: este cartão vai para o topo e vira o destaque.
     $('cards').prepend(node);
     for (const other of cards.values()) if (other !== node) { other.classList.remove('latest'); other.classList.add('old'); }
+    node.classList.remove('old');
     node.classList.add('latest');
+  }
+  if (c.repeatedAt) node.dataset.repeatedAt = String(c.repeatedAt);
+  if (again) {
+    node.classList.remove('flash');
+    void node.offsetWidth; // reinicia a animação
+    node.classList.add('flash');
   }
   node.classList.toggle('error', c.state === 'error');
   node.replaceChildren();
-  node.append(el('p', 'q', c.questionPt || (c.state === 'error' ? 'Não consegui responder' : 'Pensando…')));
-  node.append(el('p', 'orig', `“${c.original}”`));
-  if (c.bullets?.length) {
-    const ul = el('ul');
-    for (const b of c.bullets) ul.append(el('li', null, b));
-    node.append(ul);
+  // Ordem de leitura: pergunta em português (uma linha), a frase para falar (grande) e as palavras-chave.
+  const q = el('p', 'q', c.questionPt || (c.state === 'error' ? 'Não consegui responder' : 'Pensando…'));
+  q.title = c.questionPt || '';
+  if (c.repeatedAt) q.prepend(el('span', 'again', 'de novo'));
+  node.append(q);
+  if (c.say) node.append(el('p', 'say', c.say));
+  if (c.keys?.length) {
+    const keys = el('p', 'keys');
+    for (const k of c.keys) keys.append(el('span', null, k));
+    node.append(keys);
   }
+  const orig = el('p', 'orig', `“${c.original}”`);
+  orig.title = c.original;
+  node.append(orig);
   if (c.state === 'error') node.append(el('p', 'meta', c.error || 'Erro desconhecido'));
   if (c.state === 'done' && c.ms) node.append(el('p', 'meta', `${new Date(c.at).toLocaleTimeString('pt-BR')} · respondida em ${(c.ms / 1000).toFixed(1)} s`));
   $('cards').scrollTop = 0;
