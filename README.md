@@ -152,6 +152,28 @@ Isso gera, na pasta `dist\`:
 O ícone é aplicado pelo `build/after-pack.js` (rcedit), porque a assinatura do electron-builder exige permissão de link simbólico no Windows.
 Os executáveis não são assinados, então o SmartScreen pode avisar na primeira execução: clique em "Mais informações" e depois em "Executar assim mesmo".
 
+## Ohara Guia (edição para quem não é desenvolvedor)
+
+Uma edição separada, no mesmo repositório, para dar a outra pessoa: usa o mesmo núcleo (IAs, roteador, cota), mas sem as integrações pessoais (reuniões, WhatsApp, Slack, Orca, entrevista, voz) e sem caminhos deste PC. Tem outro nome, outra pasta de dados (`%APPDATA%\Ohara Guia`) e pode ser instalada ao lado da Ohara.
+
+```powershell
+npm run start:guia   # abre a Ohara Guia a partir do código
+npm run dist:guia    # gera dist-guia\Ohara-Guia-Setup-<versão>.exe e Ohara-Guia-Portatil-<versão>.exe
+```
+
+| Recurso | Como funciona |
+|---|---|
+| Várias IAs | Claude, Codex, Gemini (Gemini CLI, com camada grátis) e IA local (Ollama). Cada uma descrita em `src/core/providers/registry.js`; para acrescentar outra, basta um adaptador e uma entrada no registro. |
+| Orquestração | `src/core/multi-router.js` classifica o pedido, vê o que ele exige (nível do modelo, ferramentas, imagem) e dá uma nota a cada IA pronta juntando custo, qualidade e cota já gasta. Modos: economia (padrão), equilíbrio e qualidade. Se a escolhida falhar por cota ou login, a próxima assume e o contexto vai junto. |
+| Cota unificada | Claude e Codex informam a cota real; a do Gemini é estimada pelos pedidos do dia. A tela "Uso e economia" mostra quanto o roteamento economizou contra o Claude Sonnet (preço de API equivalente, só para comparar). |
+| Planejador | A ideia vira um plano (objetivo, etapas, riscos, perguntas) feito no modelo forte. Cada etapa roda depois no modelo mais barato que resolve aquele tipo de etapa. Dá para pedir ajustes mantendo as etapas feitas. |
+| Rede de segurança | Antes e depois de cada pedido num projeto, uma foto da pasta (`src/core/checkpoints.js`, num Git separado em `%APPDATA%\Ohara Guia\pontos`, sem tocar no projeto). "Desfazer" volta só os arquivos que a IA mexeu; "Refazer" traz de volta. As IAs são instruídas a não mexer fora da pasta e a pedir confirmação antes de ações difíceis de desfazer. |
+| Explicações | O fim de cada tarefa traz "O que eu fiz" e "Como conferir", sem jargão. "Por quê?" em cada resposta mostra o motivo da escolha da IA. |
+| Abrir meu projeto | Descobre como rodar a pasta (site estático no navegador; Node ou Python num terminal). |
+| Primeiros passos | Checagem de saúde: internet, Node, Git e cada IA (instalada? logada?), com botões "Instalar" e "Fazer login" que abrem o terminal com o comando certo. Repete a cada 10 minutos. |
+
+Atualização automática: os releases da Guia vão para `Gabs-X/ohara-guia` (configurado em `build/guia.builder.json`); o repositório precisa ser público para o app de outra pessoa conseguir baixar.
+
 ## Modo entrevista
 
 Para entrevistas em inglês no Teams (ou qualquer app de chamada). Abra com **Ctrl+Alt+E** ou pela bandeja → **Modo entrevista** e clique em **Começar a ouvir**.

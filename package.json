@@ -9,7 +9,10 @@
     "dev": "electron . --dev",
     "test": "node --test test/*.test.js",
     "dist": "electron-builder --win nsis portable --publish never && node build/finish-dist.js",
-    "release": "npm run dist && node build/release.js"
+    "release": "npm run dist && node build/release.js",
+    "start:guia": "electron src/guia/main.js",
+    "dev:guia": "electron src/guia/main.js --dev",
+    "dist:guia": "electron-builder --config build/guia.builder.json --win nsis portable --publish never"
   },
   "build": {
     "appId": "com.gabsx.central-ia",

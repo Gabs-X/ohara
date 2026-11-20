@@ -9,7 +9,7 @@ const { ollamaModels } = require('./providers/ollama');
 
 function defaultRun(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { windowsHide: true, timeout: opts.timeout || 8000, shell: process.platform === 'win32' }, (err, stdout, stderr) => {
+    execFile(cmd, args, { windowsHide: true, timeout: opts.timeout || 8000 }, (err, stdout, stderr) => {
       resolve({ ok: !err, stdout: String(stdout || ''), stderr: String(stderr || '') });
     });
   });
@@ -30,7 +30,8 @@ const home = () => os.homedir();
 function loginFiles(id, config, env = process.env) {
   switch (id) {
     case 'claude': {
-      const dir = (config.claude?.configDir || env.CLAUDE_CONFIG_DIR || path.join(home(), '.claude')).replace(/^~(?=$|[\\/])/, home());
+      // Mesma pasta que o provedor usa para rodar (configDir, ~/.claude-pessoal se existir, ou o padrão).
+      const dir = require('./providers/claude').claudeConfigDir(config) || env.CLAUDE_CONFIG_DIR || path.join(home(), '.claude');
       return { files: [path.join(dir, '.credentials.json')], env: ['ANTHROPIC_API_KEY'] };
     }
     case 'codex':

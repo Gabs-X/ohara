@@ -59,6 +59,8 @@ class GuideAgent {
     this.runProvider = runProvider || require('../core/providers/registry').runProvider;
     this.running = new Map(); // runId -> { chatId, ac }
     if (!this.chats.data.chats) this.chats.data.chats = [];
+    // Respostas que estavam rodando quando o app fechou.
+    for (const c of this.chats.data.chats) for (const m of c.messages || []) if (m.pending) { delete m.pending; m.error ||= 'Interrompido (o app foi fechado).'; }
   }
 
   // ---------- Conversas ----------
@@ -180,13 +182,14 @@ class GuideAgent {
     chat.messages.push({ role: 'user', text: label || text, images, at: Date.now() });
     if (chat.title === 'Nova conversa') chat.title = clip((label || text).replace(/\s+/g, ' '), 48);
     const runId = clientRunId || crypto.randomUUID();
-    const assistant = { id: runId, role: 'assistant', text: '', provider: decision.provider, model: decision.modelLabel || decision.model, route: decision, tools: [], at: Date.now() };
+    const assistant = { id: runId, role: 'assistant', text: '', provider: decision.provider, model: decision.modelLabel || decision.model, route: decision, tools: [], pending: true, at: Date.now() };
     chat.messages.push(assistant);
     chat.updatedAt = Date.now();
     this.chats.save();
     this.emit('chat:route', { chatId, runId, route: decision });
 
     if (!decision.provider) {
+      delete assistant.pending;
       assistant.error = decision.error;
       this.chats.save();
       this.emit('chat:done', { chatId, runId, message: assistant, running: this.isRunning(chatId) });
@@ -201,7 +204,8 @@ class GuideAgent {
       this.emit('chat:event', { chatId, runId, ...ev });
     };
 
-    const before = decision.provider !== 'ollama' ? await this.#snapshot(chat.cwd, `antes: ${clip(label || text, 80)}`) : null;
+    // Planejar não mexe em arquivos: sem foto. A IA local também não mexe.
+    const before = decision.provider !== 'ollama' && decision.category !== 'planejamento' ? await this.#snapshot(chat.cwd, `antes: ${clip(label || text, 80)}`) : null;
     const attempts = [decision, ...(decision.fallbacks || [])].slice(0, MAX_ATTEMPTS);
     const failures = [];
     let result = null;
@@ -246,6 +250,7 @@ class GuideAgent {
       this.running.delete(runId);
     }
 
+    delete assistant.pending;
     assistant.provider = used.provider;
     assistant.model = used.modelLabel || result.model;
     assistant.modelId = result.model;

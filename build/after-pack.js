@@ -7,7 +7,7 @@ const rcedit = rceditModule.rcedit || rceditModule;
 
 exports.default = async function afterPack(context) {
   if (context.electronPlatformName !== 'win32') return;
-  const { productFilename } = context.packager.appInfo;
+  const { productFilename, productName } = context.packager.appInfo;
   const exe = path.join(context.appOutDir, `${productFilename}.exe`);
   const version = context.packager.appInfo.version;
   await rcedit(exe, {
@@ -15,8 +15,8 @@ exports.default = async function afterPack(context) {
     'file-version': version,
     'product-version': version,
     'version-string': {
-      ProductName: 'Ohara',
-      FileDescription: 'Ohara',
+      ProductName: productName || 'Ohara', // "Ohara" ou "Ohara Guia"
+      FileDescription: productName || 'Ohara',
       CompanyName: 'Gabs-X',
       LegalCopyright: 'Gabs-X',
     },
