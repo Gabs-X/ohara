@@ -25,9 +25,10 @@ test('histórico do modelo local: mantém as mensagens mais recentes dentro do o
   assert.deepEqual(buildHistory([{ role: 'user', text: '' }]), [], 'mensagem vazia fica de fora');
 });
 
-test('o prompt do modelo local diz que ele só conversa e oferece a automelhoria', () => {
+test('o prompt do modelo local diz que ele consulta o PC, não altera nada e oferece a automelhoria', () => {
   const p = systemPrompt(DEFAULT_CONFIG, { project: 'ohara' });
-  assert.match(p, /NÃO executa comandos|NÃO executa/);
+  assert.match(p, /NÃO altera nada/);
+  assert.match(p, /CONSULTA o PC/);
   assert.match(p, /\[\[melhoria:/);
   assert.match(p, /Projeto em foco nesta conversa: ohara/);
 });

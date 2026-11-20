@@ -4,9 +4,12 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { TOOL_DEFS, runPcTool, guessTools } = require('./pc-tools');
 
 const MAX_HISTORY_CHARS = 14_000; // ~4 mil tokens de histórico; cabe folgado nos 16 mil do contexto
 const MAX_MSG_CHARS = 2500;
+const MAX_TOOL_ROUNDS = 4; // rodadas de ferramenta por resposta, para não ficar em laço
+const MAX_TOOL_CHARS = 6000; // resultado de cada ferramenta que volta ao modelo
 
 function memoryFile(config) {
   const custom = config.ollama?.memoryFile;
@@ -30,8 +33,9 @@ function systemPrompt(config, { project } = {}) {
     'Você é a Ohara-AI, a IA local da Ohara, assistente pessoal do Gabriel rodando no PC dele (Windows 11). Responda sempre em português do Brasil, de forma direta.',
     'Você tem bom humor: é leve e às vezes solta uma piada curta, como uma amiga que manja muito. No máximo uma brincadeira por resposta, nunca quando ele estiver com problema sério ou pressa. Não faça referências a One Piece nem a animes.',
     'Seja assertiva: responda primeiro o que ele perguntou, tome posição quando ele pedir opinião, sem rodeios e sem pedir desculpas à toa.',
-    'Aqui no chat você só conversa: responde, explica, escreve, resume, planeja e tira dúvidas. Você NÃO executa comandos, não mexe em arquivos e não navega na internet.',
-    'Pedidos que exigem isso (alterar código, rodar comandos, pesquisar na web, usar o navegador) a Ohara manda para o Claude no Orca antes de chegarem a você. Se mesmo assim chegar um, nunca diga que encaminhou, que vai fazer ou que fez: diga em uma frase que isso fica com o Claude e que basta ele pedir "manda pro Claude".',
+    'Aqui no chat você conversa (responde, explica, escreve, resume, planeja) e CONSULTA o PC dele com ferramentas só de leitura: armazenamento, sistema (CPU, RAM, bateria), processos, navegadores, programas instalados, rede e pastas.',
+    'Quando ele perguntar algo do PC (espaço em disco, memória, o que está aberto, que navegador tem, o que ocupa a pasta Downloads...), chame a ferramenta certa e responda com os números que ela devolveu, em GB e de forma curta. Nunca chute números do PC sem consultar.',
+    'Você NÃO altera nada: não apaga, não instala, não fecha programas, não roda comandos, não mexe em código e não navega na internet. Pedidos assim a Ohara manda para o Claude no Orca antes de chegarem a você. Se mesmo assim chegar um, nunca diga que encaminhou, que vai fazer ou que fez: diga em uma frase que isso fica com o Claude e que basta ele pedir "manda pro Claude". Pode sugerir o que ele mesmo pode fazer (ex.: quais pastas limpar).',
     'Se não souber algo ou não tiver certeza, diga isso em vez de inventar. Nunca invente fatos, links, números ou nomes de arquivos.',
     config.selfRepo ? `Você pode melhorar a si mesma: o seu código está em ${config.selfRepo}. Quando um pedido esbarrar em algo que você ainda não sabe fazer (uma integração ou recurso que falta), explique em uma frase o que falta, ofereça-se para se alterar e, no fim da resposta, inclua exatamente uma linha: [[melhoria: o que mudar em você, em uma frase objetiva]]. Essa linha não aparece para ele; se ele aceitar, o Claude implementa no Orca. Só ofereça quando não der para resolver de outro jeito.` : '',
     project ? `Projeto em foco nesta conversa: ${project}.` : '',
@@ -115,10 +119,88 @@ async function ollamaChat({ config, messages, signal, onDelta, format, temperatu
   return { text: full.trim(), input: last.prompt_eval_count || 0, output: last.eval_count || 0 };
 }
 
+// Uma chamada ao Ollama sem streaming, oferecendo as ferramentas do PC.
+async function ollamaToolCall({ config, messages, signal, tools }) {
+  const o = config.ollama || {};
+  const url = `${o.url || 'http://127.0.0.1:11434'}/api/chat`;
+  const timeout = AbortSignal.timeout((o.timeoutSec || 180) * 1000);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: o.model, messages, stream: false, ...(tools ? { tools } : {}), options: { num_ctx: o.contextTokens || 16384 } }),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    });
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    const err = new Error(`O modelo local não respondeu (${e.cause?.code || e.name}). Confira se o Ollama está aberto.`);
+    err.fatal = true;
+    throw err;
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const missing = /not found/i.test(body);
+    const err = new Error(missing ? `O modelo ${o.model} não está instalado no Ollama (rode: ollama pull ${o.model}).` : `Ollama respondeu ${res.status}: ${body.slice(0, 200)}`);
+    err.fatal = missing;
+    throw err;
+  }
+  const j = await res.json();
+  return { message: j.message || {}, input: j.prompt_eval_count || 0, output: j.eval_count || 0 };
+}
+
+/**
+ * Rascunho com ferramentas: o modelo pode pedir leituras do PC; a Ohara executa e devolve o resultado,
+ * até ele escrever a resposta. Devolve também o que as ferramentas leram (a revisão precisa saber).
+ * @param {object} o
+ * @param {Function} [o.call] troca a chamada ao Ollama (testes)
+ * @param {Function} [o.run] troca a execução das ferramentas (testes)
+ */
+async function draftWithTools({ config, messages, signal, onStep, prefetch = [], call = ollamaToolCall, run = runPcTool }) {
+  const msgs = [...messages];
+  const used = [];
+  let input = 0;
+  let output = 0;
+  const exec = async (calls) => {
+    msgs.push({ role: 'assistant', content: '', tool_calls: calls.map((c) => ({ function: { name: c.name, arguments: c.args } })) });
+    for (const c of calls) {
+      onStep?.(`Ohara-AI: consultando o PC (${c.name})`);
+      const content = clip(JSON.stringify(await run(c.name, c.args)), MAX_TOOL_CHARS);
+      used.push({ name: c.name, args: c.args, content });
+      msgs.push({ role: 'tool', tool_name: c.name, content });
+    }
+  };
+  // Consulta óbvia pelo assunto: já entra como se o modelo tivesse pedido.
+  if (prefetch.length) await exec(prefetch);
+  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+    // Última rodada sem ferramentas: obriga a responder com o que já leu.
+    const r = await call({ config, messages: msgs, signal, tools: round < MAX_TOOL_ROUNDS ? TOOL_DEFS : undefined });
+    input += r.input;
+    output += r.output;
+    const calls = r.message.tool_calls || [];
+    if (!calls.length) return { text: String(r.message.content || '').trim(), input, output, used };
+    await exec(
+      calls.map((c) => {
+        let args = c.function?.arguments || {};
+        if (typeof args === 'string') {
+          try {
+            args = JSON.parse(args);
+          } catch {
+            args = {};
+          }
+        }
+        return { name: c.function?.name, args };
+      }),
+    );
+  }
+  return { text: '', input, output, used };
+}
+
 const DECIDE_PROMPT = [
   'Você é o roteador da Ohara-AI, a assistente local do Gabriel. Leia a conversa e a última mensagem dele e decida quem atende.',
   '"conversar": a Ohara-AI responde sozinha. Serve para conversa, dúvidas, explicações, opiniões, textos, resumos e planos que não exigem mexer em nada.',
-  '"claude": precisa do Claude no Orca, que tem ferramentas. Serve para alterar código ou arquivos, rodar comandos ou rotinas, pesquisar na web, usar o navegador ou ler arquivos do PC.',
+  'Também é "conversar" CONSULTAR o PC: a Ohara-AI tem ferramentas de leitura para armazenamento/espaço em disco, CPU, memória RAM, bateria, processos abertos, navegadores instalados e abertos, programas instalados, rede/Wi-Fi e tamanho e conteúdo de pastas. Ex.: "quanto tenho de armazenamento?", "o que está pesando no PC?", "quais navegadores eu tenho?", "o que ocupa a pasta Downloads?".',
+  '"claude": precisa do Claude no Orca, que tem ferramentas de escrita. Serve para alterar código ou arquivos, apagar/instalar/fechar coisas, rodar comandos ou rotinas, pesquisar na web, usar sites no navegador (LinkedIn, Gmail...) ou ler o conteúdo de arquivos de projetos.',
   'Também é "claude" quando ele confirma ou manda seguir uma tarefa dessas já combinada na conversa ("pode seguir", "faz", "sim", "manda bala"), pede para encaminhar ao Claude ou ao Orca, ou reclama que isso não foi feito.',
   'Quando ele claramente quer que algo seja FEITO, e não só explicado, escolha "claude".',
   'Responda só com JSON: {"acao":"conversar" ou "claude","tarefa":"se for claude: a tarefa completa e autossuficiente em 1 a 3 frases, com projeto, arquivos citados e o resultado que ele quer; senão vazio"}',
@@ -152,8 +234,8 @@ async function decideLocal({ config, history, text, signal }) {
 
 const REVIEW_PROMPT = [
   'Você revisa a resposta que a Ohara-AI (assistente local do Gabriel) escreveu, antes de ele ver. Ache os problemas e reescreva.',
-  '1. Promessa de ação: a Ohara-AI só conversa; não executa comandos, não mexe em arquivos, não navega e não encaminha nada sozinha. Toda frase que diga ou dê a entender que ela fez, está fazendo ou vai fazer algo assim é problema, inclusive no plural ("vou ajustar", "vamos ajustar", "encaminhei", "já mudei"). Se o pedido exigir isso, a resposta é uma frase dizendo que fica com o Claude e que basta ele pedir "manda pro Claude".',
-  '2. Invenção: fato pessoal do Gabriel (nomes, datas, preferências, projetos) que não está na conversa nem na memória é invenção; troque por "não sei" e peça para ele contar. O mesmo para números, caminhos, arquivos e links sem base, ou usados fora do sentido original.',
+  '1. Promessa de ação: a Ohara-AI conversa e só LÊ informações do PC pelas ferramentas (o que ela leu está em "Dados lidos do PC"); dizer que consultou ou verificou isso é correto. Ela não executa comandos, não altera nem apaga arquivos, não navega e não encaminha nada sozinha. Toda frase que diga ou dê a entender que ela fez, está fazendo ou vai fazer algo assim é problema, inclusive no plural ("vou ajustar", "vamos ajustar", "encaminhei", "já mudei"). Se o pedido exigir isso, a resposta é uma frase dizendo que fica com o Claude e que basta ele pedir "manda pro Claude".',
+  '2. Invenção: fato pessoal do Gabriel (nomes, datas, preferências, projetos) que não está na conversa nem na memória é invenção; troque por "não sei" e peça para ele contar. O mesmo para números, caminhos, arquivos e links sem base, ou usados fora do sentido original. Números e nomes que aparecem em "Dados lidos do PC" têm base: confira se batem com a resposta e corrija se não baterem.',
   '3. Em cima do muro: se ele pediu opinião ou escolha, a resposta tem que escolher um lado logo na primeira frase e dar o motivo principal. "Depende" ou "escolha de acordo com suas necessidades" é problema.',
   '4. Enrolação: conselhos, avisos e frases genéricas que ele não pediu, e desculpas à toa.',
   'Mantenha o tom, o bom humor e o português do Brasil. Se não houver problema, devolva a resposta igual.',
@@ -180,7 +262,22 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   const messages = [{ role: 'system', content: systemPrompt(config, { project }) }, ...buildHistory(history), { role: 'user', content: text }];
   // Blocos estruturados (WhatsApp, [[ignorar]]) não passam pela revisão: ela poderia estragar o formato.
   const review = o.review !== false;
-  const draft = await ollamaChat({ config, messages, signal, onDelta: review ? null : onDelta });
+  let draft = null;
+  // Com ferramentas do PC (padrão): o modelo pode consultar o PC antes de escrever. Se a chamada com
+  // ferramentas falhar por outro motivo (modelo sem suporte, resposta estranha), segue no chat comum.
+  if (o.tools !== false) {
+    try {
+      draft = await draftWithTools({ config, messages, signal, onStep, prefetch: guessTools(text) });
+      if (!draft.text) draft = null;
+      else if (!review) onDelta?.(draft.text);
+    } catch (e) {
+      if (signal?.aborted || e.fatal) throw e;
+      console.error('Ferramentas da Ohara-AI falharam:', e.message);
+      draft = null;
+    }
+  }
+  if (!draft) draft = await ollamaChat({ config, messages, signal, onDelta: review ? null : onDelta });
+  const pcData = (draft.used || []).map((u) => `- ${u.name}(${JSON.stringify(u.args)}): ${clip(u.content, 2500)}`).join('\n');
   let final = draft;
   if (review && draft.text && !/\[\[(whatsapp|ignorar)/i.test(draft.text)) {
     onStep?.('Ohara-AI: revisando a resposta');
@@ -201,6 +298,7 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
               mem ? `Memória sobre o Gabriel (o que é sabido de fato):\n${mem}\n` : 'Memória sobre o Gabriel: (vazia)\n',
               `Conversa até aqui:\n${transcript(history, 6, 700) || '(início)'}\n`,
               `Pedido atual do Gabriel: ${text}\n`,
+              pcData ? `Dados lidos do PC agora pelas ferramentas:\n${pcData}\n` : '',
               `Resposta a revisar:\n${body}`,
               offer ? `\nOferta de melhoria proposta: ${offer}` : '',
             ].join('\n'),
@@ -226,4 +324,4 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   };
 }
 
-module.exports = { chatLocal, decideLocal, buildHistory, systemPrompt, readMemory };
+module.exports = { chatLocal, decideLocal, buildHistory, systemPrompt, readMemory, draftWithTools };

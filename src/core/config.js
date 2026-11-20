@@ -54,6 +54,7 @@ const DEFAULT_CONFIG = {
     contextTokens: 16384, // janela de contexto (o padrão do Ollama é pequeno para buscas em reuniões)
     embedModel: 'bge-m3', // busca por significado nos documentos (ollama pull bge-m3)
     visionModel: 'qwen2.5vl:7b', // leitura de documento por foto (ollama pull qwen2.5vl:7b)
+    tools: true, // Ohara-AI consulta o PC sozinha (disco, memória, processos, navegadores, programas, rede, pastas); só leitura
   },
 
   // Ferramentas locais → Documentos: pastas indexadas para a busca por significado (nada sai do PC).
