@@ -81,7 +81,15 @@ function expand(events, from, to) {
     const byDay = r.BYDAY ? r.BYDAY.split(',').map((d) => DAYS[d.slice(-2)]) : null;
     let n = 0;
     const startDay = new Date(e.start);
-    for (let i = 0; i < 400 && n < count; i++) {
+    // Sem COUNT, não precisa contar desde o começo: pula direto para perto de "from", alinhado ao ciclo
+    // (senão uma reunião semanal criada há mais de 400 dias sumia da agenda).
+    let first = 0;
+    if (count === Infinity && from > startDay) {
+      const period = r.FREQ === 'WEEKLY' ? 7 * interval : r.FREQ === 'DAILY' ? interval : 1;
+      const behind = Math.floor((from - startDay) / 864e5) - 7;
+      if (behind > 0) first = behind - (behind % period);
+    }
+    for (let i = first; i < first + 400 && n < count; i++) {
       const day = new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + i, startDay.getHours(), startDay.getMinutes(), startDay.getSeconds());
       if (until && day > until) break;
       if (day > to) break;

@@ -337,7 +337,8 @@ class Orchestrator {
       const explicit = isHandoff(normalize(text));
       // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
       const skip = config.ollama?.decide === false || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && asksPcInfo(text));
-      const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text });
+      // Limite curto: com o Ollama lento ou travado, o pedido ficava até 3 min invisível e sem como cancelar.
+      const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text, signal: AbortSignal.timeout(15_000) }).catch(() => null);
       if (explicit || verdict?.acao === 'claude') {
         handoff = { task: verdict?.tarefa || '' };
         Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
