@@ -18,7 +18,9 @@ if (!yml.includes(`version: ${version}`)) throw new Error(`release: latest.yml n
 const notes = path.join(dist, `notas-${version}.md`);
 // A tag precisa já estar no GitHub, no commit desta versão: sem ela o gh criaria a tag no master atual.
 const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-const remote = execFileSync('git', ['ls-remote', 'origin', `refs/tags/${tag}`], { cwd: root, encoding: 'utf8' }).trim().split(/\s+/)[0];
+// Tag anotada: o "^{}" é o commit para onde ela aponta (sem ele vem o hash do objeto da tag).
+const refs = execFileSync('git', ['ls-remote', 'origin', `refs/tags/${tag}`, `refs/tags/${tag}^{}`], { cwd: root, encoding: 'utf8' }).trim().split('\n').map((l) => l.split(/\s+/));
+const remote = (refs.find((r) => r[1]?.endsWith('^{}')) || refs[0] || [])[0];
 if (remote !== head) throw new Error(`release: a tag ${tag} não está no GitHub apontando para o commit atual (${head.slice(0, 7)}). Faça commit, git tag ${tag} e git push origin ${tag}.`);
 const args = ['release', 'create', tag, ...files, '-R', 'Gabs-X/ohara', '--title', `Ohara ${version}`, '--verify-tag'];
 args.push(...(fs.existsSync(notes) ? ['--notes-file', notes] : ['--generate-notes']));
