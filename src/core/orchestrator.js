@@ -4,7 +4,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const { route, classify, findProject, learnPreferences, normalize } = require('./router');
 const os = require('os');
-const { chatLocal, decideLocal } = require('./local-chat');
+const { chatLocal, decideLocal, briefLocal } = require('./local-chat');
+const { BRIEF_PROMPT, parseBrief, briefInput } = require('./brief');
 const { runClaude, buildChatArgs } = require('./providers/claude');
 const { anonymize, deanonymize } = require('./local-tools');
 const { sendToOrca } = require('../integrations/orca');
@@ -132,6 +133,19 @@ function parseAccount(text, { loose = false } = {}) {
 
 const ACCOUNT_QUESTION = (cfg) =>
   `Antes de abrir o Orca: esse pedido é para o **${cfg?.imlaw?.label || 'Claude do escritório (ImLaw)'}** ou para o **${cfg?.pessoal?.label || 'Claude pessoal'}**? Responda "imlaw" ou "pessoal" que eu abro já com o pedido.`;
+
+// Briefing em texto para o prompt do Claude no Orca.
+function briefText(b) {
+  if (!b) return '';
+  const items = (title, list) => (list.length ? `\n${title}:\n${list.map((x) => `- ${x}`).join('\n')}` : '');
+  return [
+    `\nTarefa (preparada pela Ohara a partir da conversa): ${b.titulo}`,
+    `Objetivo: ${b.objetivo}`,
+    b.contexto ? `Contexto: ${b.contexto}` : '',
+    items('Pronto quando', b.criterios),
+    items('Confirme com ele antes de mexer, se precisar', b.duvidas),
+  ].filter(Boolean).join('\n');
+}
 
 function clip(text, max) {
   const s = String(text || '');
@@ -443,8 +457,12 @@ class Orchestrator {
               : text;
         const account = answered?.account || parseAccount(text);
         // O nome do console e da branch saem da tarefa, não de "pode seguir".
-        const label = answered ? answered.pending.text : handoff?.task || text;
-        result = await this.#toOrca({ chat, config, text: label, request, cwd, userIndex, onEvent, assistant, account, withContext: !!handoff });
+        // Melhoria aceita: o nome sai do que vai mudar, não do "sim".
+        const label = answered ? answered.pending.text : improvement ? improvement.desc : handoff?.task || text;
+        result = await this.#toOrca({
+          chat, config, text: label, request, cwd, userIndex, onEvent, assistant, account,
+          withContext: !!handoff, brief: answered?.pending.brief || null, hint: handoff?.task || '', signal: ac.signal,
+        });
       } else if (decision.provider === 'claude') {
         try {
           result = await this.#claudeInChat({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source });
@@ -474,6 +492,8 @@ class Orchestrator {
           onDelta: (t) => onEvent({ kind: 'delta', text: t }),
           onStep: (t) => onEvent({ kind: 'tool', text: t }),
         });
+        // A Ohara-AI não sabia: em vez de chutar ou devolver "não sei", pergunta ao Claude sozinha.
+        if (result?.consult) result = await this.#consultClaude({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source, local: result });
       }
     } catch (err) {
       result = { provider: decision.provider, model: decision.model, text: '', error: ac.signal.aborted ? 'Cancelado.' : err.message, tokens: {} };
@@ -534,6 +554,32 @@ class Orchestrator {
     return null;
   }
 
+  // A Ohara-AI respondeu "[[consultar_claude]]": o Claude responde no chat. Sem cota ou com erro,
+  // fica a resposta honesta do modelo local (nunca a marcação).
+  async #consultClaude({ chat, config, text, userIndex, decision, signal, onEvent, source, local }) {
+    const fallback = () => {
+      const t = local.text || 'Não sei responder isso com segurança agora, e não consegui consultar o Claude.';
+      onEvent({ kind: 'delta', text: t });
+      return { ...local, text: t, consult: undefined };
+    };
+    const why = this.#claudeChatBlocked(config);
+    if (why) {
+      decision.reasons = [...(decision.reasons || []), `a Ohara-AI não sabia (${local.consult}), mas ${why}: ficou no modelo local`];
+      return fallback();
+    }
+    onEvent({ kind: 'tool', text: `Ohara-AI não sabia (${clip(local.consult, 80)}): consultando o Claude` });
+    Object.assign(decision, { provider: 'claude', model: config.claude.models.equilibrado, tier: 'equilibrado', effort: 'medium' });
+    decision.reasons = [...(decision.reasons || []), `a Ohara-AI não sabia e consultou o Claude: ${local.consult}`];
+    try {
+      return await this.#claudeInChat({ chat, config, text, userIndex, decision, signal, onEvent, source });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      decision.reasons = [...(decision.reasons || []), `o Claude não respondeu (${clip(err.message, 160)})`];
+      Object.assign(decision, { provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined });
+      return fallback();
+    }
+  }
+
   // O Claude responde no próprio chat: recebe a conversa como contexto, só tem internet e não salva sessão.
   async #claudeInChat({ chat, config, text, userIndex, decision, signal, onEvent, source }) {
     let prompt = `${this.#handoff(chat, 'claude', { upTo: userIndex, fresh: true })}${text}`;
@@ -585,14 +631,23 @@ class Orchestrator {
   }
 
   // Abre o Orca no projeto, na branch da tarefa, com o Claude já recebendo o pedido e o contexto.
-  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null, withContext = false }) {
+  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null, withContext = false, brief = null, hint = '', signal = null }) {
     const general = config.orca?.generalDir || config.defaultCwd;
-    const dir = cwd && fs.existsSync(cwd) ? cwd : general;
-    const key = path.resolve(dir).toLowerCase();
+    let dir = cwd && fs.existsSync(cwd) ? cwd : general;
+    const keyOf = (d) => path.resolve(d).toLowerCase();
+    // Console novo: antes de abrir, a Ohara analisa a conversa e monta a tarefa (título, branch, objetivo,
+    // contexto, critérios). Sem projeto definido, o assunto do briefing escolhe o projeto.
+    if (!brief && !chat.orca?.[keyOf(dir)]?.terminal) {
+      brief = await this.#brief({ chat, config, text, userIndex, hint, onEvent, signal });
+    }
+    if (brief?.projectPath && dir === general && fs.existsSync(brief.projectPath)) dir = brief.projectPath;
+    const key = keyOf(dir);
     const state = chat.orca?.[key] || null;
-    // Console novo: antes de abrir, pergunta qual Claude (escritório ou pessoal). Continuar no console aberto não pergunta.
+    // Console novo: usa a conta que ele já escolheu para este projeto (ou nesta conversa); só pergunta
+    // qual Claude (escritório ou pessoal) quando não há escolha anterior. Continuar no console aberto não pergunta.
+    if (!account && !state?.terminal && !state?.account) account = this.#knownAccount(chat, key, dir);
     if (!account && !state?.terminal && !state?.account) {
-      chat.pendingOrca = { text, request, dir, at: Date.now() };
+      chat.pendingOrca = { text, request, dir, brief, at: Date.now() };
       return { provider: 'orca', model: 'Claude no Orca', text: ACCOUNT_QUESTION(config.orca?.accounts), tokens: {} };
     }
     const recent = chat.messages
@@ -621,22 +676,83 @@ class Orchestrator {
           'Você foi aberto pela Ohara, assistente pessoal do Gabriel, para fazer esta tarefa. Responda em português do Brasil.',
           `Pasta do projeto: ${dir}${dir === general ? ` (nenhum projeto definido; os repositórios ficam em ${config.workspaceRoot})` : ''}.`,
           'Regras: commits sem linha de coautoria; não dê push, não publique e não faça nada destrutivo sem pedir confirmação a ele; no fim, resuma em poucas frases o que foi feito.',
+          'Vá a fundo antes de mexer: leia o código relacionado, reproduza o problema e confirme a causa. Se o pedido for vago, investigue e proponha um plano curto antes de alterar.',
+          briefText(brief),
           recent ? `\nConversa recente com a Ohara:\n${recent}` : '',
           browserNote ? `\n${browserNote}` : '',
-          `\nPedido do Gabriel:\n${request}`,
+          `\n${brief ? 'Mensagem original do Gabriel' : 'Pedido do Gabriel'}:\n${request}`,
         ];
     // Aspas duplas viram "^" no caminho até o Orca: troca por aspas tipográficas.
     const prompt = parts.filter(Boolean).join('\n').replace(/"/g, '”');
     onEvent({ kind: 'tool', text: 'Orca: abrindo o projeto e o Claude' });
-    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account });
+    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account, branch: brief?.branch || null, title: brief?.titulo || null });
     (chat.orca ||= {})[key] = r.state;
     if (dir !== general) chat.lastProject = dir;
+    this.#rememberAccount(chat, key, r.state?.account || account);
     const where = r.branch ? `no projeto **${path.basename(r.root)}**, na branch \`${r.branch}\`` : `na pasta **${path.basename(r.root)}**`;
     const msg = r.reused
       ? `Mandei o pedido para o Claude que já está trabalhando ${where}, no Orca.`
       : `Abri o Orca ${where}, com o Claude já recebendo o pedido e o contexto da nossa conversa. Acompanhe e responda por lá.`;
     assistant.orca = { branch: r.branch, root: r.root, reused: r.reused };
     return { provider: 'orca', model: 'Claude no Orca', text: msg, tokens: {} };
+  }
+
+  // Briefing da tarefa: primeiro no modelo local (sem cota); se não servir, pede ao Claude no chat
+  // (só com cota e sem a privacidade ligada, que exigiria anonimizar). Falhou tudo → null (pedido como veio).
+  async #brief({ chat, config, text, userIndex, hint, onEvent, signal }) {
+    if (config.orca?.brief === false) return null;
+    const history = chat.messages.slice(0, userIndex);
+    const projects = this.#projects();
+    onEvent({ kind: 'tool', text: 'Ohara-AI: analisando a conversa para montar a tarefa' });
+    let b = await briefLocal({ config, history, text, projects, hint, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25_000)]) : AbortSignal.timeout(25_000) }).catch((e) => {
+      if (signal?.aborted) throw e;
+      return null;
+    });
+    if (b || this.#claudeChatBlocked(config) || config.privacy?.anonymizeCloud) return b;
+    onEvent({ kind: 'tool', text: 'Briefing: o modelo local não conseguiu, pedindo ao Claude' });
+    const convo = history
+      .filter((m) => m.text)
+      .slice(-10)
+      .map((m) => `${m.role === 'user' ? 'Gabriel' : 'Ohara'}: ${clip(m.text, 900)}`)
+      .join('\n');
+    try {
+      const r = await runClaude({
+        config,
+        args: buildChatArgs({ model: config.claude.models.rapido, effort: 'low', systemPrompt: BRIEF_PROMPT }),
+        cwd: os.tmpdir(),
+        prompt: briefInput({ convo, text, projects, hint }),
+        signal,
+        onEvent: () => {},
+      });
+      b = r.error ? null : parseBrief(r.text, projects);
+      if (b) {
+        try {
+          this.usage.record('claude', r.model, r.tokens, 'chat');
+        } catch {}
+      }
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      b = null;
+    }
+    return b;
+  }
+
+  // Conta já escolhida: a deste projeto (lembrada entre conversas), a da conversa, ou ImLaw pelo caminho.
+  #knownAccount(chat, key, dir) {
+    const saved = this.prefs?.data?.accounts?.[key];
+    if (saved === 'imlaw' || saved === 'pessoal') return saved;
+    if (chat.lastAccount === 'imlaw' || chat.lastAccount === 'pessoal') return chat.lastAccount;
+    return /imlaw/i.test(String(dir || '')) ? 'imlaw' : null;
+  }
+
+  #rememberAccount(chat, key, account) {
+    if (account !== 'imlaw' && account !== 'pessoal') return;
+    chat.lastAccount = account;
+    if (!this.prefs?.data) return;
+    (this.prefs.data.accounts ||= {})[key] = account;
+    try {
+      this.prefs.save();
+    } catch {}
   }
 
   // Resposta ("imlaw"/"pessoal") à pergunta de qual Claude abrir, até 30 min depois.

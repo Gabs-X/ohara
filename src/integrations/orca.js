@@ -95,6 +95,12 @@ function branchSlug(text, max = 5) {
   return slug || 'tarefa';
 }
 
+// Branch vinda do briefing: "tipo/slug" em minúsculas e sem espaço; qualquer outra coisa é ignorada.
+function validBranch(b) {
+  const s = String(b || '').trim();
+  return /^(feat|fix|chore|docs|refactor)\/[a-z0-9][a-z0-9-]{2,39}$/.test(s) ? s : null;
+}
+
 // Seletor que o `orca account select` aceita para a conta escolhida ("imlaw" ou "pessoal").
 function accountSelector(config, key) {
   const set = config?.orca?.accounts?.[key]?.account;
@@ -186,7 +192,9 @@ function handleOf(result) {
  * @param {string} [o.account] conta do Claude escolhida ("imlaw" ou "pessoal"); vale para o console novo
  * @returns {Promise<{state:object, branch:string|null, worktree:string|null, reused:boolean, root:string, kind:'git'|'folder', startedOrca:boolean}>}
  */
-async function sendToOrca({ config, cwd, request, prompt, state = null, account = null }) {
+async function sendToOrca({ config, cwd, request, prompt, state = null, account = null, branch = null, title = null }) {
+  // Título do briefing (quando houver) dá nome ao console; senão, as primeiras palavras do pedido.
+  const label = title || request;
   const bin = orcaBin(config);
   const agent = config.orca?.agent || 'claude';
   const { started: startedOrca } = await ensureOrca(bin);
@@ -226,25 +234,27 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
       try {
         const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `id:${state.worktree}`, '--prompt', line, '--surface', 'terminal', '--focus']);
         const next = { ...state, account: acc, terminal: handleOf(res) };
-        await labelConsole(bin, { terminal: next.terminal, worktree: state.worktree, root, request, account: acc });
+        await labelConsole(bin, { terminal: next.terminal, worktree: state.worktree, root, request: label, account: acc });
         return { state: next, branch: state.branch, worktree: state.worktree, reused: true, root, kind, startedOrca };
       } catch {
         // worktree apagada: cria outra
       }
     }
-    const name = branchSlug(request);
-    const res = await orcaJson(bin, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--branch', name, '--agent', agent, '--prompt', line, '--surface', 'terminal', '--activate'], { timeout: 180_000 });
+    // Branch do briefing ("fix/ohara-roteamento"); a pasta da worktree não leva a barra.
+    const ref = validBranch(branch) || branchSlug(request);
+    const name = ref.replace(/\//g, '-');
+    const res = await orcaJson(bin, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--branch', ref, '--agent', agent, '--prompt', line, '--surface', 'terminal', '--activate'], { timeout: 180_000 });
     const wt = res.worktree || res;
-    const next = { repoId: repo.id, account: acc, worktree: wt.id || null, branch: String(wt.branch || name).replace(/^refs\/heads\//, ''), terminal: handleOf(res) };
-    await labelConsole(bin, { terminal: next.terminal, worktree: next.worktree, root, request, account: acc });
+    const next = { repoId: repo.id, account: acc, worktree: wt.id || null, branch: String(wt.branch || ref).replace(/^refs\/heads\//, ''), terminal: handleOf(res) };
+    await labelConsole(bin, { terminal: next.terminal, worktree: next.worktree, root, request: label, account: acc });
     return { state: next, branch: next.branch, worktree: next.worktree, reused: false, root, kind, startedOrca };
   }
 
   // Pasta comum (sem git): abre o Claude na própria pasta.
   const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `path:${root}`, '--prompt', line, '--surface', 'terminal', '--focus']);
   const next = { repoId: repo.id, account: acc, worktree: null, branch: null, terminal: handleOf(res) };
-  await labelConsole(bin, { terminal: next.terminal, root, request, account: acc });
+  await labelConsole(bin, { terminal: next.terminal, root, request: label, account: acc });
   return { state: next, branch: null, worktree: null, reused: false, root, kind, startedOrca };
 }
 
-module.exports = { sendToOrca, singleLinePrompt, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };
+module.exports = { sendToOrca, validBranch, singleLinePrompt, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };

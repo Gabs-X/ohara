@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { TOOL_DEFS, runPcTool, guessTools } = require('./pc-tools');
 const { ollamaUrl } = require('./providers/ollama');
+const { BRIEF_PROMPT, parseBrief, briefInput } = require('./brief');
 
 const MAX_HISTORY_CHARS = 14_000; // ~4 mil tokens de histórico; cabe folgado nos 16 mil do contexto
 const MAX_MSG_CHARS = 2500;
@@ -38,6 +39,7 @@ function systemPrompt(config, { project } = {}) {
     'Quando ele perguntar algo do PC (espaço em disco, memória, o que está aberto, que navegador tem, o que ocupa a pasta Downloads...), chame a ferramenta certa e responda com os números que ela devolveu, em GB e de forma curta. Nunca chute números do PC sem consultar.',
     'Você NÃO altera nada: não apaga, não instala, não fecha programas, não roda comandos, não mexe em código e não navega na internet. Pedidos assim a Ohara manda para o Claude no Orca antes de chegarem a você. Se mesmo assim chegar um, nunca diga que encaminhou, que vai fazer ou que fez: diga em uma frase que isso fica com o Claude e que basta ele pedir "manda pro Claude". Pode sugerir o que ele mesmo pode fazer (ex.: quais pastas limpar).',
     'Se não souber algo ou não tiver certeza, diga isso em vez de inventar. Nunca invente fatos, links, números ou nomes de arquivos.',
+    'Você não está sozinha: se for uma pergunta de fato, técnica ou de informação atual (não sobre a vida pessoal dele) que você não sabe responder com segurança, não chute nem devolva "não sei". Responda só [[consultar_claude: o que falta saber, em poucas palavras]] e nada mais: a Ohara pergunta ao Claude e ele vê a resposta dele.',
     config.selfRepo ? `Você pode melhorar a si mesma: o seu código está em ${config.selfRepo}. Quando um pedido esbarrar em algo que você ainda não sabe fazer (uma integração ou recurso que falta), explique em uma frase o que falta, ofereça-se para se alterar e, no fim da resposta, inclua exatamente uma linha: [[melhoria: o que mudar em você, em uma frase objetiva]]. Essa linha não aparece para ele; se ele aceitar, o Claude implementa no Orca. Só ofereça quando não der para resolver de outro jeito.` : '',
     project ? `Projeto em foco nesta conversa: ${project}.` : '',
     mem ? `\nO que você já sabe sobre o Gabriel (memória):\n${mem}` : '',
@@ -204,11 +206,14 @@ const DECIDE_PROMPT = [
   '"claude": precisa do Claude no Orca, que tem ferramentas de escrita. Serve para alterar código ou arquivos, apagar/instalar/fechar coisas, rodar comandos ou rotinas, pesquisas longas na web para uma tarefa, usar sites no navegador (LinkedIn, Gmail...) ou ler o conteúdo de arquivos de projetos.',
   'Também é "claude" quando ele confirma ou manda seguir uma tarefa dessas já combinada na conversa ("pode seguir", "faz", "sim", "manda bala"), pede para encaminhar ao Claude ou ao Orca, ou reclama que isso não foi feito.',
   'Quando ele claramente quer que algo seja FEITO, e não só explicado, escolha "claude".',
+  'Pense antes de decidir: qual é a intenção real dele? Uma ORDEM ("corrige", "abre", "manda pro Claude") é diferente de uma PERGUNTA sobre se algo é possível ("tem como...?", "dá pra...?", "você consegue...?"): pergunta é "conversar" (ela explica e oferece fazer), mesmo que a frase tenha um verbo de ação.',
+  'Mensagem sobre a própria Ohara (o que ela é, o que sabe fazer, se dá para ensinar ou adicionar coisas nela, como ela funciona) é "conversar". "Ohara" no começo da frase é ele chamando você pelo nome, não o projeto. Reclamação ou desabafo sobre ela também é "conversar" (reconheça o erro e ofereça a melhoria), a não ser que ele peça para abrir o Orca ou mandar ao Claude.',
+  'Na dúvida se é para abrir o Orca, NÃO escolha "claude": abrir um projeto sem ele pedir atrapalha mais do que ajuda.',
   '"claude_chat": o Claude responde aqui mesmo no chat, sem abrir projeto. Gasta cota, então só use quando for NECESSÁRIO e o assunto NÃO for projeto, código ou arquivos (isso é sempre "claude"). Casos:',
   '- precisa de informação atual ou da internet que o modelo local não tem (notícia, cotação, preço, lei ou versão recente, resultado de jogo, previsão do tempo);',
   '- raciocínio difícil em que errar custa caro: análise jurídica, contas e finanças com vários passos, comparação técnica detalhada, texto longo e formal (contrato, petição, e-mail delicado);',
   '- a Ohara-AI já errou ou não soube responder nesta conversa e ele reclamou, ou ele pediu uma resposta mais caprichada ou a opinião do Claude sem ser sobre projeto.',
-  'Conversa comum, dúvidas simples, explicações gerais, textos curtos, resumos e consultas do PC são "conversar", mesmo que o Claude fosse fazer melhor. Na dúvida entre "conversar" e "claude_chat", escolha "conversar".',
+  'Conversa comum, dúvidas simples, explicações gerais, textos curtos, resumos e consultas do PC são "conversar", mesmo que o Claude fosse fazer melhor. Se você não tiver certeza de que a Ohara-AI sabe responder bem (fato que ela pode não saber, assunto técnico ou específico), escolha "claude_chat": é melhor consultar o Claude do que inventar.',
   'Responda só com JSON: {"acao":"conversar", "claude" ou "claude_chat","tarefa":"se for claude: a tarefa completa e autossuficiente em 1 a 3 frases, com projeto, arquivos citados e o resultado que ele quer; senão vazio","motivo":"se for claude_chat: em poucas palavras, por que o modelo local não basta; senão vazio"}',
 ].join('\n');
 
@@ -240,17 +245,40 @@ async function decideLocal({ config, history, text, signal }) {
   }
 }
 
+/** Briefing no modelo local (não gasta cota). Nunca lança, exceto cancelamento: falhou → null. */
+async function briefLocal({ config, history, text, projects, hint, signal }) {
+  try {
+    const r = await ollamaChat({
+      config,
+      signal,
+      format: 'json',
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: BRIEF_PROMPT },
+        { role: 'user', content: briefInput({ convo: transcript(history, 10, 900), text, projects, hint }) },
+      ],
+    });
+    return parseBrief(r.text, projects);
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return null;
+  }
+}
+
 const REVIEW_PROMPT = [
   'Você revisa a resposta que a Ohara-AI (assistente local do Gabriel) escreveu, antes de ele ver. Ache os problemas e reescreva.',
   '1. Promessa de ação: a Ohara-AI conversa e só LÊ informações do PC pelas ferramentas (o que ela leu está em "Dados lidos do PC"); dizer que consultou ou verificou isso é correto. Ela não executa comandos, não altera nem apaga arquivos, não navega e não encaminha nada sozinha. Toda frase que diga ou dê a entender que ela fez, está fazendo ou vai fazer algo assim é problema, inclusive no plural ("vou ajustar", "vamos ajustar", "encaminhei", "já mudei"). Se o pedido exigir isso, a resposta é uma frase dizendo que fica com o Claude e que basta ele pedir "manda pro Claude".',
   '2. Invenção: fato pessoal do Gabriel (nomes, datas, preferências, projetos) que não está na conversa nem na memória é invenção; troque por "não sei" e peça para ele contar. O mesmo para números, caminhos, arquivos e links sem base, ou usados fora do sentido original. Números e nomes que aparecem em "Dados lidos do PC" têm base: confira se batem com a resposta e corrija se não baterem.',
   '3. Em cima do muro: se ele pediu opinião ou escolha, a resposta tem que escolher um lado logo na primeira frase e dar o motivo principal. "Depende" ou "escolha de acordo com suas necessidades" é problema.',
   '4. Enrolação: conselhos, avisos e frases genéricas que ele não pediu, e desculpas à toa.',
+  '5. Não sabe: se a resposta, no fundo, diz que não sabe, chuta ou fica vaga sobre um fato, assunto técnico ou informação atual que NÃO é da vida pessoal dele, marque "consultar": true (a Ohara pergunta ao Claude). Fato pessoal dele que ninguém sabe não conta.',
   'Mantenha o tom, o bom humor e o português do Brasil. Se não houver problema, devolva a resposta igual.',
-  'Responda só com JSON: {"problemas":["cada problema achado, curto"],"resposta":"a resposta final, pronta para ele ler","melhoria":true se a oferta de melhoria proposta for mesmo sobre um recurso que falta na Ohara e a resposta oferecer isso, senão false}',
+  'Responda só com JSON: {"problemas":["cada problema achado, curto"],"resposta":"a resposta final, pronta para ele ler","melhoria":true se a oferta de melhoria proposta for mesmo sobre um recurso que falta na Ohara e a resposta oferecer isso, senão false,"consultar":true ou false (item 5)}',
 ].join('\n');
 
 const MARK_RE = /\n?\[\[[^\]]+\]\]\s*/g;
+// A Ohara-AI não sabe responder: "[[consultar_claude: motivo]]" → a Ohara pergunta ao Claude no chat.
+const CONSULT_RE = /\[\[consultar_claude:?\s*([^\]]*)\]\]/i;
 const IMPROVE_MARK_RE = /\[\[melhoria:[^\]]+\]\]/i;
 
 /**
@@ -285,6 +313,10 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
     }
   }
   if (!draft) draft = await ollamaChat({ config, messages, signal, onDelta: review ? null : onDelta });
+  // Ela mesma disse que não sabe: devolve sem mostrar nada, para a Ohara consultar o Claude.
+  const tokensOf = (d) => ({ input: d.input || 0, cached: 0, output: d.output || 0, costUsd: 0 });
+  const asked = String(draft.text || '').match(CONSULT_RE);
+  if (asked) return { provider: 'ollama', model: o.model, text: draft.text.replace(MARK_RE, '\n').trim(), consult: asked[1].trim() || 'a Ohara-AI não sabia', tokens: tokensOf(draft) };
   const pcData = (draft.used || []).map((u) => `- ${u.name}(${JSON.stringify(u.args)}): ${clip(u.content, 2500)}`).join('\n');
   let final = draft;
   if (review && draft.text && !/\[\[(whatsapp|ignorar)/i.test(draft.text)) {
@@ -314,6 +346,9 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
         ],
       });
       const j = JSON.parse(r.text);
+      if (j.consultar === true) {
+        return { provider: 'ollama', model: o.model, text: body, consult: 'a revisão viu que a resposta não sabia', tokens: { input: draft.input + r.input, cached: 0, output: draft.output + r.output, costUsd: 0 } };
+      }
       const fixed = String(j.resposta || '').replace(MARK_RE, '\n').trim();
       if (fixed) final = { text: [fixed, offer && j.melhoria === true ? offer : ''].filter(Boolean).join('\n'), input: draft.input + r.input, output: draft.output + r.output };
       onDelta?.(fixed || draft.text);
@@ -332,4 +367,4 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   };
 }
 
-module.exports = { chatLocal, decideLocal, buildHistory, systemPrompt, readMemory, draftWithTools };
+module.exports = { chatLocal, decideLocal, briefLocal, buildHistory, systemPrompt, readMemory, draftWithTools };

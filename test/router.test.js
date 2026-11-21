@@ -131,3 +131,29 @@ test('"ohara" como chamamento não vira o projeto da Ohara; "na ohara" vira', ()
   assert.equal(findProject(normalize('melhora o codigo da ohara'), projects)?.name, 'ohara');
   assert.equal(findProject(normalize('taverna bot corrige o login'), projects)?.name, 'taverna-bot');
 });
+
+test('briefing: valida branch, cai para o título e acha o projeto pelo nome', () => {
+  const { parseBrief } = require('../src/core/brief');
+  const projects = [{ name: 'ohara', path: 'C:/p/ohara' }];
+  const ok = parseBrief('{"titulo":"Roteamento da Ohara","branch":"fix/Ohara Roteamento!","projeto":"Ohara","objetivo":"x"}', projects);
+  assert.equal(ok.branch, 'fix/ohara-roteamento');
+  assert.equal(ok.projectPath, 'C:/p/ohara');
+  const bad = parseBrief('lixo {"titulo":"Melhora a busca","branch":"abre-orca-ai","objetivo":"x"} fim', projects);
+  assert.equal(bad.branch, 'feat/melhora-a-busca');
+  assert.equal(bad.projeto, '');
+  assert.equal(parseBrief('{"titulo":"","objetivo":""}'), null);
+  assert.equal(parseBrief('não é json'), null);
+  const { validBranch } = require('../src/integrations/orca');
+  assert.equal(validBranch('fix/ohara-roteamento'), 'fix/ohara-roteamento');
+  assert.equal(validBranch('abre-orca-ai-eu-fala'), null);
+  assert.equal(validBranch('fix/../../x'), null);
+});
+
+test('briefing: a entrada leva projetos (marcando o da Ohara), conversa, resumo e a última mensagem', () => {
+  const { briefInput } = require('../src/core/brief');
+  const t = briefInput({ convo: 'Gabriel: a Ohara abriu o Orca à toa', text: 'abre o orca', projects: [{ name: 'ohara', self: true }, { name: 'ImLaw' }], hint: 'corrigir roteamento' });
+  assert.match(t, /Projetos conhecidos: ohara \(projeto da Ohara\), ImLaw/);
+  assert.match(t, /Conversa até aqui:\nGabriel: a Ohara abriu o Orca à toa/);
+  assert.match(t, /Resumo da Ohara-AI: corrigir roteamento/);
+  assert.match(t, /Última mensagem do Gabriel: abre o orca$/);
+});

@@ -20,7 +20,12 @@ stub('core/local-chat', {
     if (opts.signal) opts.signal.addEventListener('abort', () => call.finish?.());
     await new Promise((resolve) => { call.finish = resolve; });
     if (opts.signal?.aborted) throw new Error('abortado');
-    return { provider: 'ollama', model: 'qwen-teste', text: call.answer ?? `resposta: ${opts.text}`, tokens: {} };
+    return { provider: 'ollama', model: 'qwen-teste', text: call.answer ?? `resposta: ${opts.text}`, consult: call.consult, tokens: {} };
+  },
+  // Briefing da tarefa do Orca: por padrão null (pedido como veio); o teste troca.
+  briefLocal: async (opts) => {
+    briefCalls.push(opts);
+    return briefResult;
   },
   // Decisão da Ohara-AI: por padrão "conversar"; o teste troca o veredito.
   decideLocal: async (opts) => {
@@ -29,6 +34,8 @@ stub('core/local-chat', {
   },
 });
 const decideCalls = [];
+const briefCalls = [];
+let briefResult = null;
 let verdict = { acao: 'conversar', tarefa: '' };
 stub('integrations/orca', {
   sendToOrca: async (opts) => {
@@ -67,6 +74,8 @@ function setup(extra = {}) {
   orcaCalls.length = 0;
   orcaFail = null;
   decideCalls.length = 0;
+  briefCalls.length = 0;
+  briefResult = null;
   verdict = { acao: 'conversar', tarefa: '' };
   claudeCalls.length = 0;
   claudeFail = null;
@@ -455,4 +464,96 @@ test('Claude no chat: se o Claude falhar, a Ohara-AI responde', async () => {
   const msg = await p;
   assert.equal(msg.provider, 'ollama');
   assert.ok(!msg.error);
+});
+
+// ---- Ohara mais inteligente: pergunta não abre o Orca, consulta o Claude sozinha, briefing e conta lembrada ----
+
+test('"ohara, tem como eu te ensinar...?" é conversa: não vira o projeto da Ohara nem abre o Orca', async () => {
+  const { o } = setup();
+  o.projCache = { root: DEFAULT_CONFIG.workspaceRoot, at: Date.now(), list: [{ name: 'ohara', path: WORK, self: true }] };
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'ohara vc como uma IA Ollama tem como eu te ensinar a fazer coisas ou adicionar ?', runId: 'q1' });
+  await tick();
+  assert.equal(decideCalls.length, 1, 'a Ohara-AI decidiu, não a regra fixa');
+  assert.equal(localCalls.length, 1);
+  localCalls[0].finish();
+  const msg = await p;
+  assert.equal(msg.provider, 'ollama');
+  assert.equal(orcaCalls.length, 0);
+});
+
+test('a Ohara-AI não sabia ([[consultar_claude]]): pergunta ao Claude sozinha e mostra a resposta dele', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'qual a diferença entre o HTTP/3 e o QUIC?', runId: 'k1' });
+  await tick();
+  localCalls[0].consult = 'detalhe técnico que não sei';
+  localCalls[0].answer = '';
+  localCalls[0].finish();
+  const msg = await p;
+  assert.equal(claudeCalls.length, 1);
+  assert.equal(msg.text, 'resposta do Claude');
+  assert.equal(msg.provider, 'claude');
+  assert.ok(msg.route.reasons.some((r) => /não sabia e consultou o Claude/.test(r)));
+  assert.ok(msg.tools.some((t) => /consultando o Claude/.test(t)));
+});
+
+test('não sabia e o Claude falhou: fica a resposta honesta do modelo local, sem a marcação', async () => {
+  const { o } = setup();
+  claudeFail = 'sem login';
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'qual a diferença entre o HTTP/3 e o QUIC?', runId: 'k2' });
+  await tick();
+  localCalls[0].consult = 'não sei';
+  localCalls[0].answer = '';
+  localCalls[0].finish();
+  const msg = await p;
+  assert.equal(msg.provider, 'ollama');
+  assert.match(msg.text, /Não sei responder isso com segurança/);
+  assert.doesNotMatch(msg.text, /\[\[/);
+});
+
+test('briefing: o Orca abre com branch e título do assunto, objetivo e contexto analisados, e no projeto deduzido', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  briefResult = {
+    titulo: 'Roteamento da Ohara',
+    branch: 'fix/ohara-roteamento-orca',
+    projeto: 'ohara',
+    projectPath: WORK,
+    objetivo: 'Parar de abrir o Orca para perguntas sobre a própria Ohara.',
+    contexto: 'Ele perguntou se dava para ensinar a Ohara e ela abriu o Orca no projeto errado.',
+    criterios: ['pergunta sobre ela fica na conversa'],
+    duvidas: [],
+  };
+  const msg = await sendOrca(o, chat.id, 'abre o orca ai pra eu fala da sua burrice', 'b1');
+  assert.equal(briefCalls.length, 1, 'o briefing roda uma vez, mesmo com a pergunta da conta no meio');
+  assert.equal(orcaCalls.length, 1);
+  assert.equal(orcaCalls[0].branch, 'fix/ohara-roteamento-orca');
+  assert.equal(orcaCalls[0].title, 'Roteamento da Ohara');
+  assert.match(orcaCalls[0].prompt, /Objetivo: Parar de abrir o Orca/);
+  assert.match(orcaCalls[0].prompt, /Pronto quando:\n- pergunta sobre ela fica na conversa/);
+  assert.match(orcaCalls[0].prompt, /Mensagem original do Gabriel:\nabre o orca ai pra eu fala da sua burrice/);
+  assert.match(orcaCalls[0].prompt, /Vá a fundo antes de mexer/);
+  assert.equal(msg.provider, 'orca');
+});
+
+test('sem briefing (modelo local e Claude falharam), o pedido segue como veio', async () => {
+  const { o } = setup();
+  claudeFail = 'fora';
+  const chat = o.create(WORK);
+  await sendOrca(o, chat.id, 'corrige o bug do login na ohara', 'b2');
+  assert.equal(orcaCalls[0].branch, null);
+  assert.match(orcaCalls[0].prompt, /Pedido do Gabriel:\ncorrige o bug do login na ohara/);
+});
+
+test('a conta escolhida fica lembrada: o próximo console no mesmo projeto não pergunta de novo', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  await sendOrca(o, chat.id, 'corrige o bug do login na ohara', 'a1', 'imlaw');
+  const other = o.create(WORK);
+  const msg = await o.send(other.id, { text: 'corrige o bug do cadastro na ohara', runId: 'a2' });
+  assert.doesNotMatch(msg.text, /Responda "imlaw" ou "pessoal"/);
+  assert.equal(orcaCalls.length, 2);
+  assert.equal(orcaCalls[1].account, 'imlaw');
 });
