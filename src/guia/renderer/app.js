@@ -277,12 +277,37 @@ function fillAssistant(wrap, m, live) {
     ${m.switched?.length ? `<div class="switched">↪ ${esc(m.switched.join(' · '))}</div>` : ''}
     ${tools.length ? `<details class="tools"><summary>🔧 ${tools.length} ${tools.length === 1 ? 'ação' : 'ações'} da IA</summary><ul>${tools.slice(-60).map((t) => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
     <div class="bubble">${m.text ? renderMarkdown(m.text) : live ? '<span class="typing"><span class="spin"></span> pensando…</span>' : ''}${m.error ? `<div class="error">⚠️ ${esc(m.error)}</div>` : ''}</div>
-    ${cp ? checkpointHtml(cp) : ''}`;
+    ${cp ? checkpointHtml(cp) : ''}
+    ${!live && m.pcActions?.length ? pcActionsHtml(m) : ''}`;
+  wirePcActions(wrap, m);
   wrap.querySelector('[data-a=copy]')?.addEventListener('click', () => { navigator.clipboard.writeText(m.text || ''); toast('Copiado.'); });
   wrap.querySelectorAll('.bubble pre .copy').forEach((b) => b.addEventListener('click', () => navigator.clipboard.writeText(b.nextElementSibling.textContent)));
   wrap.querySelectorAll('.bubble a').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); guia.openExternal(a.href); }));
   wrap.querySelector('[data-a=undo]')?.addEventListener('click', () => undoMsg(m, 'undo'));
   wrap.querySelector('[data-a=redo]')?.addEventListener('click', () => undoMsg(m, 'redo'));
+}
+
+// Ações da Ohara-AI no PC que esperam confirmação (fechar programa, apagar, desligar...).
+// O botão só diz qual item confirmar: o que roda é o que ficou guardado na mensagem.
+const PC_ACTION_LABEL = { running: 'fazendo…', done: '✓ feito', error: '⚠️ falhou', cancelled: 'cancelada', expired: 'expirou' };
+function pcActionsHtml(m) {
+  return '<div class="pc-actions">' + m.pcActions.map((a, i) => {
+    const detail = a.status === 'done' ? a.result : a.status === 'error' ? a.error : '';
+    const right = a.status === 'pending'
+      ? '<button class="btn small primary" data-pc="ok" data-i="' + i + '">Confirmar</button><button class="btn small" data-pc="no" data-i="' + i + '">Cancelar</button>'
+      : '<span class="muted">' + esc(PC_ACTION_LABEL[a.status] || a.status) + (detail ? ' · ' + esc(detail) : '') + '</span>';
+    return '<div class="pc-action ' + esc(a.status) + '"><span class="what">⚙️ ' + esc(a.resumo) + '</span>' + right + '</div>';
+  }).join('') + '</div>';
+}
+function wirePcActions(wrap, m) {
+  wrap.querySelectorAll('[data-pc]').forEach((b) => b.addEventListener('click', async (e) => {
+    // Só clique de verdade (mouse/teclado): clique gerado por script não confirma ação no PC.
+    if (!e.isTrusted) return;
+    const i = Number(b.dataset.i);
+    b.disabled = true;
+    const r = b.dataset.pc === 'ok' ? await guia.pcActionConfirm(state.chatId, m.id, i) : await guia.pcActionCancel(state.chatId, m.id, i);
+    if (r && r.ok === false) toast(r.error || 'Não deu certo.');
+  }));
 }
 
 function checkpointHtml(cp) {
@@ -428,6 +453,9 @@ guia.onEvent(({ chatId, runId, kind, text }) => {
   if (chatId !== state.chatId || renderTimer) return;
   renderTimer = setTimeout(() => {
     renderTimer = null;
+    // A resposta pode ter terminado nesses 120 ms: redesenhar "ao vivo" agora apagaria o que o fim mostrou
+    // (botões de Confirmar, Desfazer...).
+    if (!state.lives.has(runId)) return;
     fillAssistant(findMsgEl(runId), live.msg, true);
     scrollBottom();
   }, 120);
@@ -699,6 +727,7 @@ async function renderHealth() {
     <div class="card"><h2>2. Suas IAs</h2>${ias.map(row).join('')}
       <div class="hint" data-css="margin-top:10px">Ao clicar em <b>Instalar</b> ou <b>Fazer login</b>, abre uma janela preta (o terminal). Siga o que aparecer nela e,
       quando terminar, feche a janela e clique em <b>↻ Verificar de novo</b> aqui em cima.</div></div>
+    <div class="card ohara-ai" id="ohara-ai-card"><h2>✨ Ohara-AI no seu PC</h2><p class="muted"><span class="spin"></span> Verificando…</p></div>
     <div class="card"><h2>3. Pronto?</h2>
       <p>${readyIas.length ? `IAs prontas: <b>${esc(readyIas.join(', '))}</b>.` : 'Nenhuma IA pronta ainda.'}</p>
       <button class="btn primary" id="start" ${readyIas.length ? '' : 'disabled'}>Começar a usar</button>
@@ -708,6 +737,7 @@ async function renderHealth() {
     if (r) toast(r.hint ? `Abri o terminal. ${r.hint}` : 'Abri o terminal. Quando terminar, feche a janela e clique em "Verificar de novo".');
   }));
   body.querySelectorAll('[data-url]').forEach((b) => b.addEventListener('click', () => guia.openExternal(b.dataset.url)));
+  renderOharaAi();
   body.querySelector('#hn-save').addEventListener('click', async () => {
     const saved = await tryCall(guia.setConfig({ userName: body.querySelector('#hn').value.trim() }));
     if (!saved) return;
@@ -724,6 +754,74 @@ async function renderHealth() {
     setView('chat');
   });
 }
+// ---------- Ohara-AI: baixar o modelo local aqui dentro ----------
+// O modelo só escolhe a ferramenta; quem lê e faz coisas no PC é o app (com confirmação para o arriscado).
+let oharaAiProgress = null; // { id, percent, status, completedGB, totalGB } durante o download
+const PULL_STATUS = (st) => (/manifest/.test(st) && !/writing/.test(st) ? 'preparando' : /verifying/.test(st) ? 'conferindo' : /writing|success/.test(st) ? 'finalizando' : 'baixando');
+
+function oharaAiProgressHtml() {
+  const p = oharaAiProgress;
+  if (!p) return '';
+  const pct = p.percent == null ? '' : ' ' + p.percent + '%';
+  const size = p.totalGB ? ' (' + p.completedGB + ' de ' + p.totalGB + ' GB)' : '';
+  return '<progress id="oa-progress" max="100"' + (p.percent == null ? '' : ' value="' + p.percent + '"') + '></progress>'
+    + '<div class="muted small" id="oa-progress-txt">' + esc(PULL_STATUS(p.status || '')) + pct + size + '</div>';
+}
+
+async function renderOharaAi() {
+  const box = $('#ohara-ai-card');
+  if (!box) return;
+  const r = await guia.oharaAiStatus();
+  if (!r?.ok) { box.innerHTML = '<h2>✨ Ohara-AI no seu PC</h2><p class="muted">Não consegui verificar agora (' + esc(r?.error || 'erro') + ').</p>'; return; }
+  const st = r.data;
+  const hw = st.hardware || {};
+  const busy = !!oharaAiProgress;
+  const rows = st.models.map((m) => {
+    const rec = m.id === st.recommended.id;
+    let right;
+    if (m.installed) right = st.current === m.id ? '<span class="muted">✅ em uso</span>' : '<button class="btn small" data-oa-use="' + esc(m.id) + '">Usar esta</button>';
+    else if (busy && oharaAiProgress.id === m.id) right = '<button class="btn small" data-oa-cancel>Cancelar</button>';
+    else right = '<button class="btn small' + (rec ? ' primary' : '') + '" data-oa-dl="' + esc(m.id) + '"' + (st.ollama && !busy ? '' : ' disabled') + '>Baixar (' + m.sizeGB + ' GB)</button>';
+    return '<div class="model"><span class="name"><b>' + esc(m.label) + '</b>' + (rec ? ' <span class="rec">recomendada para este PC</span>' : '')
+      + '<br><span class="muted small">' + esc(m.note) + (m.fits ? '' : ' · deve ficar lenta neste PC') + '</span></span>' + right + '</div>';
+  }).join('');
+  box.innerHTML = '<h2>✨ Ohara-AI no seu PC</h2>'
+    + '<p>Uma IA grátis que roda no seu computador: <b>lê e faz coisas no PC</b> (volume, música, print, lembretes, achar e ler arquivos, '
+    + 'fechar programas, limpar espaço, desligar). O que é arriscado sempre pede o seu <b>Confirmar</b> antes. Seus dados não saem do PC.</p>'
+    + (st.ollama ? '' : '<p class="error">Primeiro instale o Ollama (item "IA local" acima) e clique em ↻ Verificar de novo.</p>')
+    + (st.ready ? '<p>✅ Pronta. É só pedir no chat, por exemplo: "abaixa o volume", "acha o contrato nos downloads", "me lembra de ligar pro João em 20 minutos".</p>' : '')
+    + '<p class="muted small">Seu PC: ' + (hw.ramGB || '?') + ' GB de memória' + (hw.vramGB ? ' · placa de vídeo com ' + hw.vramGB + ' GB' : ' · sem placa de vídeo dedicada') + '.</p>'
+    + '<div class="models">' + rows + '</div><div id="oa-progress-box">' + oharaAiProgressHtml() + '</div>';
+  box.querySelectorAll('[data-oa-dl]').forEach((b) => b.addEventListener('click', async () => {
+    const id = b.dataset.oaDl;
+    oharaAiProgress = { id, percent: null, status: 'pulling manifest' };
+    renderOharaAi();
+    const res = await guia.oharaAiDownload(id);
+    oharaAiProgress = null;
+    if (res?.ok) {
+      state.config = await call(guia.getConfig()).catch(() => state.config);
+      toast('Ohara-AI pronta! Já pode pedir no chat.');
+    } else toast(res?.error || 'O download não terminou.');
+    renderOharaAi();
+  }));
+  box.querySelector('[data-oa-cancel]')?.addEventListener('click', () => guia.oharaAiCancel());
+  box.querySelectorAll('[data-oa-use]').forEach((b) => b.addEventListener('click', async () => {
+    const saved = await tryCall(guia.setConfig({ ollama: { model: b.dataset.oaUse } }));
+    if (saved) { state.config = saved; toast('Pronto: a Ohara-AI agora usa ' + b.dataset.oaUse + '.'); }
+    renderOharaAi();
+  }));
+}
+
+// Progresso: só a barra muda (redesenhar o cartão a cada evento faria os botões piscarem).
+guia.onOharaAiProgress((p) => {
+  oharaAiProgress = p;
+  const bar = $('#oa-progress');
+  const txt = $('#oa-progress-txt');
+  if (!bar || !txt) { const box = $('#oa-progress-box'); if (box) box.innerHTML = oharaAiProgressHtml(); return; }
+  if (p.percent == null) bar.removeAttribute('value'); else bar.value = p.percent;
+  txt.textContent = PULL_STATUS(p.status || '') + (p.percent == null ? '' : ' ' + p.percent + '%') + (p.totalGB ? ' (' + p.completedGB + ' de ' + p.totalGB + ' GB)' : '');
+});
+
 $('#health-recheck').addEventListener('click', async () => {
   $('#health-body').innerHTML = '<p class="muted"><span class="spin"></span> Verificando…</p>';
   await tryCall(guia.checkHealth());

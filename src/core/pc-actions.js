@@ -61,8 +61,16 @@ const PROTECTED_PROCS = new Set([
   'fontdrvhost', 'registry', 'memory compression', 'secure system', 'msmpeng', 'securityhealthservice',
   'ohara', 'electron', 'ollama', 'ollama app', 'ollama_llama_server', 'powershell', 'conhost',
 ]);
+// Nome que a pessoa usa → nome do processo no Windows ("bloco de notas" → notepad).
+const PROC_ALIASES = {
+  'bloco de notas': 'notepad', notepad: 'notepad', word: 'WINWORD', 'microsoft word': 'WINWORD', excel: 'EXCEL', 'microsoft excel': 'EXCEL',
+  powerpoint: 'POWERPNT', outlook: 'OUTLOOK', teams: 'ms-teams', 'microsoft teams': 'ms-teams', edge: 'msedge', 'microsoft edge': 'msedge',
+  'google chrome': 'chrome', 'vs code': 'Code', vscode: 'Code', 'visual studio code': 'Code', calculadora: 'CalculatorApp',
+  'explorador de arquivos': 'explorer', paint: 'mspaint', 'bloco de notas do windows': 'notepad', whatsapp: 'WhatsApp', spotify: 'Spotify',
+};
 function cleanProcName(input) {
-  const n = String(input || '').trim().replace(/\.exe$/i, '');
+  const raw = String(input || '').trim().replace(/\.exe$/i, '');
+  const n = PROC_ALIASES[raw.toLowerCase()] || raw;
   if (!n || !/^[\w .+-]{1,60}$/.test(n)) throw new Error('nome de programa inválido');
   if (PROTECTED_PROCS.has(n.toLowerCase())) throw new Error(`"${n}" é do sistema ou da própria Ohara: não fecho`);
   return n;
@@ -244,7 +252,9 @@ if(Test-Path -LiteralPath $p -PathType Container){[Microsoft.VisualBasic.FileIO.
     return { feito: `mandei ${path.basename(p)} para a Lixeira (dá para restaurar)` };
   },
 
-  async fechar_programa({ nome, forcar = false } = {}, ctx) {
+  async fechar_programa(args = {}, ctx) {
+    const { nome } = args;
+    const forcar = args.forcar === true || args['forçar'] === true; // o modelo às vezes escreve com cedilha
     const n = cleanProcName(nome);
     const r = await ctx.ps(
       `$n=${psLiteral(n)}; $ps=@(Get-Process -Name $n -ErrorAction SilentlyContinue)
@@ -331,7 +341,7 @@ function summarize(name, a = {}) {
     case 'mover': return `Mover ${f(a.origem)} para ${f(a.destino)}`;
     case 'renomear': return `Renomear ${f(a.caminho)} para ${f(a.novo_nome)}`;
     case 'lixeira': return `Mandar para a Lixeira: ${f(a.caminho)}`;
-    case 'fechar_programa': return `${a.forcar ? 'Forçar o fechamento de' : 'Fechar'} ${f(a.nome)}`;
+    case 'fechar_programa': return `${a.forcar === true || a['forçar'] === true ? 'Forçar o fechamento de' : 'Fechar'} ${f(a.nome).replace(/\.exe$/i, '')}`;
     case 'limpar_temporarios': return 'Apagar arquivos temporários com mais de 1 dia';
     case 'esvaziar_lixeira': return 'Esvaziar a Lixeira (não dá para desfazer)';
     case 'energia': return { desligar: 'Desligar', reiniciar: 'Reiniciar', suspender: 'Suspender', hibernar: 'Hibernar' }[a.acao] ? `${{ desligar: 'Desligar', reiniciar: 'Reiniciar', suspender: 'Suspender', hibernar: 'Hibernar' }[a.acao]} o PC${['desligar', 'reiniciar'].includes(a.acao) ? ` em ${Math.max(1, Math.round(Number(a.minutos) || 1))} min` : ''}` : `Energia: ${f(a.acao)}`;
@@ -393,7 +403,82 @@ async function requestAction(name, args = {}, { ctx = defaultCtx(), pending = []
   }
   const resumo = summarize(name, a);
   pending.push({ name, args: a, resumo });
-  return { status: 'aguardando_confirmacao', resumo, instrucao: 'NÃO foi feito ainda. Diga em uma frase o que vai ser feito e peça para ele confirmar no botão "Confirmar" ou respondendo "confirma".' };
+  // Sem frase pronta no imperativo: o modelo pequeno copiava a instrução na resposta.
+  return { status: 'aguardando_confirmacao', feito: false, resumo, botao: 'Confirmar' };
+}
+
+// ---------- Confirmação (igual na Ohara e no Ohara Guia) ----------
+
+const plainWords = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w\s]/g, ' ').trim();
+/** Resposta curta a uma ação pendente: 'yes' ("confirma", "pode", "sim"), 'cancel' ("não", "cancela") ou null. */
+function parseActionReply(text) {
+  const plain = plainWords(text);
+  if (!plain || plain.split(/\s+/).length > 6) return null;
+  if (/^(nao|n|cancel\w*|deixa( pra la)?|esquece|nem|para|melhor nao|nao precisa)\b/.test(plain)) return 'cancel';
+  if (/^(sim|s|pode( sim| fazer| ir)?|confirm\w*|faz( isso)?|faca|manda( ver)?|ok|okay|beleza|blz|isso|vai|bora|claro|autorizo|certo|com certeza)\b/.test(plain)) return 'yes';
+  return null;
+}
+
+/** Ações pendentes ainda válidas na mensagem ([{ a, i }]). */
+const openActions = (msg, now = Date.now()) => (msg?.pcActions || []).map((a, i) => ({ a, i })).filter(({ a }) => a.status === 'pending' && now - (a.at || 0) <= PENDING_TTL);
+
+/** Pendentes que o modelo pediu → como ficam na mensagem. */
+const toPending = (list = [], now = Date.now()) => list.map((a) => ({ ...a, status: 'pending', at: now }));
+
+/** Linha que pede a confirmação, quando a resposta do modelo não pediu. */
+function askLine(pcActions) {
+  return `Para fazer: ${pcActions.map((a) => `**${a.resumo}**`).join(', ')}. Confirme no botão ou responda "confirma".`;
+}
+
+/**
+ * Executa uma ação pendente guardada na mensagem (o botão "Confirmar" ou a resposta "confirma").
+ * Muda o status na própria ação; lança com o motivo se não der.
+ */
+async function runPending(action, ctx, { now = Date.now(), onChange = () => {} } = {}) {
+  if (action.status === 'done') return action;
+  if (action.status === 'running') throw new Error('Já está fazendo.');
+  if (action.status !== 'pending') throw new Error('Essa ação não está mais esperando confirmação.');
+  if (now - (action.at || 0) > PENDING_TTL) {
+    action.status = 'expired';
+    onChange();
+    throw new Error('O pedido expirou (vale por 10 minutos). Peça de novo.');
+  }
+  action.status = 'running';
+  onChange();
+  const r = await executeAction(action.name, action.args, ctx);
+  Object.assign(action, r.erro ? { status: 'error', error: r.erro } : { status: 'done', result: r.feito || 'feito', doneAt: Date.now() });
+  onChange();
+  if (action.status === 'error') throw new Error(action.error);
+  return action;
+}
+
+const lowerFirst = (s) => `${s.charAt(0).toLowerCase()}${s.slice(1)}`;
+
+/**
+ * Resolve "confirma"/"cancela" para as pendentes da última resposta. Devolve { intent, lines }, ou null
+ * se o texto não for uma resposta à confirmação (aí a mensagem segue para a IA normalmente).
+ */
+async function replyToPending(lastMsg, text, ctx, { onChange = () => {} } = {}) {
+  const open = openActions(lastMsg);
+  if (!open.length) return null;
+  const intent = parseActionReply(text);
+  if (!intent) return null;
+  const lines = [];
+  for (const { a } of open) {
+    if (intent === 'cancel') {
+      a.status = 'cancelled';
+      onChange();
+      lines.push(`Beleza, não vou ${lowerFirst(a.resumo)}.`);
+      continue;
+    }
+    try {
+      const done = await runPending(a, ctx, { onChange });
+      lines.push(`Pronto: ${done.result}.`);
+    } catch (err) {
+      lines.push(`Não consegui (${a.resumo}): ${err.message}`);
+    }
+  }
+  return { intent, lines };
 }
 
 // ---------- Ferramentas para o modelo ----------
@@ -467,6 +552,12 @@ function actionToolsFor(text) {
 const asksPcAction = (text) => actionToolsFor(text).length > 0;
 
 module.exports = {
+  parseActionReply,
+  openActions,
+  toPending,
+  askLine,
+  runPending,
+  replyToPending,
   ACTION_DEFS,
   ACTION_NAMES,
   PENDING_TTL,

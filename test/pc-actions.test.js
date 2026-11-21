@@ -64,9 +64,19 @@ test('ação arriscada não roda: vira pedido pendente com um resumo para ele co
   const pending = [];
   const r = await A.requestAction('fechar_programa', { nome: 'chrome' }, { ctx, pending });
   assert.equal(r.status, 'aguardando_confirmacao');
-  assert.match(r.instrucao, /NÃO foi feito/);
+  assert.equal(r.feito, false);
   assert.equal(ps.length, 0, 'nada rodou');
   assert.deepEqual(pending, [{ name: 'fechar_programa', args: { nome: 'chrome' }, resumo: 'Fechar chrome' }]);
+});
+
+test('nome que a pessoa usa vira o processo ("bloco de notas" → notepad) e "forçar" com cedilha vale', async () => {
+  assert.equal(A.cleanProcName('Bloco de Notas'), 'notepad');
+  assert.equal(A.cleanProcName('word'), 'WINWORD');
+  assert.equal(A.cleanProcName('notepad.exe'), 'notepad');
+  assert.equal(A.summarize('fechar_programa', { nome: 'notepad.exe', 'forçar': true }), 'Forçar o fechamento de notepad');
+  const { ctx, ps } = fakeCtx({ 'Get-Process': { encontrados: 1, ainda_abertos: 0 } });
+  await A.executeAction('fechar_programa', { nome: 'bloco de notas', 'forçar': true }, ctx);
+  assert.match(ps.at(-1), /if\(\$left\.Count -and \$true\)/);
 });
 
 test('pedido arriscado com alvo proibido já volta como erro ao modelo, sem virar pendente', async () => {

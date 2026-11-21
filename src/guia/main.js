@@ -21,6 +21,7 @@ const { DocIndex } = require('../core/doc-index');
 const localTools = require('../core/local-tools');
 const localLlm = require('../core/local-llm');
 const { extractText } = require('../core/doc-text');
+const oharaAi = require('../core/ollama-pull');
 const { isAppPage, sanitizeConfigPatch, assertSafeToOpen } = require('../core/ipc-guard');
 
 const APP_NAME = 'Ohara Guia';
@@ -91,7 +92,7 @@ const send = (channel, payload) => { if (win && !win.isDestroyed()) win.webConte
 
 const checkpoints = new Checkpoints({ dir: path.join(dataDir, 'pontos') });
 const docIndex = new DocIndex({ file: path.join(dataDir, 'documentos-indice.json'), getConfig, emit: (ch, p) => send(ch, p) });
-const agent = new GuideAgent({ chatsStore, usage, getConfig, getAvailable: () => new Set(health.available), emit: send, checkpoints });
+const agent = new GuideAgent({ chatsStore, usage, getConfig, getAvailable: () => new Set(health.available), emit: send, checkpoints, notify: (t, b) => notify(t, b) });
 
 // O planejador usa o agente numa conversa própria do plano: o plano fica registrado e dá para conversar sobre ele.
 const planner = new Planner({
@@ -275,6 +276,33 @@ function registerIpc() {
   handle('chat:setCwd', (id, cwd) => agent.setCwd(id, cwd));
   handle('chat:send', (id, payload) => agent.send(id, payload));
   handle('chat:cancel', (id, runId) => agent.cancel(id, runId));
+
+  // Ações da Ohara-AI no PC que esperam confirmação: a tela só diz QUAL item; o que roda é o que ficou guardado.
+  const actionRef = (chatId, messageId, index) => {
+    if (typeof chatId !== 'string' || typeof messageId !== 'string') throw new Error('Pedido inválido.');
+    const i = Number(index ?? 0);
+    if (!Number.isInteger(i) || i < 0 || i > 50) throw new Error('Pedido inválido.');
+    return [chatId, messageId, i];
+  };
+  handle('pcaction:confirm', (chatId, messageId, index) => agent.confirmPcAction(...actionRef(chatId, messageId, index)));
+  handle('pcaction:cancel', (chatId, messageId, index) => agent.cancelPcAction(...actionRef(chatId, messageId, index)));
+
+  // Baixar a Ohara-AI (o modelo local) aqui dentro, com progresso, sem terminal.
+  handle('oharaai:status', () => oharaAi.oharaAiStatus(config));
+  handle('oharaai:download', async (id) => {
+    if (pullAbort) throw new Error('Já tem um download em andamento.');
+    if (!oharaAi.MODELS.some((m) => m.id === id)) throw new Error('Modelo fora da lista da Ohara-AI.');
+    pullAbort = new AbortController();
+    try {
+      await oharaAi.pullModel(config, id, { signal: pullAbort.signal, onProgress: (p) => send('oharaai:progress', { id, ...p }) });
+      updateConfig({ ollama: { model: id } }); // passa a ser o modelo da IA local (e reconfere a saúde)
+      notify('Ohara-AI pronta', 'O modelo local foi baixado. Agora ela lê e faz coisas no seu PC.');
+      return oharaAi.oharaAiStatus(config);
+    } finally {
+      pullAbort = null;
+    }
+  });
+  handle('oharaai:cancel', () => pullAbort?.abort());
   handle('chat:undo', (id, msgId) => agent.undo(id, msgId));
   handle('chat:redo', (id, msgId) => agent.redo(id, msgId));
   handle('route:preview', (text, opts) => agent.preview(text, opts));
@@ -363,6 +391,8 @@ function registerIpc() {
   });
 }
 
+let pullAbort = null; // download da Ohara-AI em andamento
+
 // Atualização automática pelos releases do GitHub (só no app instalado).
 let updater = { state: () => ({ status: 'unsupported' }), check: async () => ({ status: 'unsupported' }), install() {} };
 function notify(title, body) {
@@ -381,6 +411,8 @@ app.whenReady().then(() => {
   createTray();
   registerHotkeys();
   refreshHealth();
+  // Deixa a Ohara-AI carregada: a primeira pergunta não espera o modelo subir (se ele não estiver baixado, não faz nada).
+  setTimeout(() => require('../core/local-chat').warmLocal(config).catch(() => {}), 5000);
   setInterval(() => refreshHealth(), 10 * 60_000);
   setInterval(() => { try { usage.sampleLimits(); } catch { /* opcional */ } }, 5 * 60_000);
 });

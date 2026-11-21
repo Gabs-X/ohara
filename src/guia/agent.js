@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const { routeMulti } = require('../core/multi-router');
 const { allSpecs, routeLabel } = require('../core/providers/registry');
+const { asksPcInfo } = require('../core/pc-tools');
+const { asksPcAction, defaultCtx, runPending, replyToPending, toPending, askLine } = require('../core/pc-actions');
 
 const MAX_CONTEXT_CHARS = 9000;
 const MAX_MSG_CHARS = 1800;
@@ -50,7 +52,10 @@ class GuideAgent {
    * @param {import('../core/checkpoints').Checkpoints} [o.checkpoints]
    * @param {(id:string, opts:object) => Promise<object>} [o.runProvider]
    */
-  constructor({ chatsStore, usage, getConfig, getAvailable, emit, checkpoints = null, runProvider = null, privacy = null }) {
+  constructor({ chatsStore, usage, getConfig, getAvailable, emit, checkpoints = null, runProvider = null, privacy = null, notify = null, actionCtx = null, localChat = null }) {
+    this.notify = notify; // notificação do Windows (lembretes da Ohara-AI)
+    this.actionCtxOverride = actionCtx; // testes: troca PowerShell e programas das ações no PC
+    this.localChat = localChat || ((o) => require('../core/local-chat').chatLocal(o)); // a Ohara-AI (modelo local com ferramentas)
     this.chats = chatsStore;
     this.usage = usage;
     this.getConfig = getConfig;
@@ -177,6 +182,17 @@ class GuideAgent {
     if (chat.cwd && !fs.existsSync(chat.cwd)) {
       chat.cwd = null;
       chat.sessions = {};
+    }
+
+    // Pedido sobre o PC (ler ou fazer: volume, arquivos, fechar programa, desligar...): a Ohara-AI resolve no
+    // modelo local, com confirmação para o arriscado. "confirma"/"cancela" responde a uma ação pendente.
+    if (!images.length && (!override || override === 'auto') && !category && !label) {
+      const acted = await this.#tryActionReply(chat, text, clientRunId);
+      if (acted) return acted;
+      if (this.#forOharaAi(text)) {
+        const local = await this.#oharaAi(chat, text, clientRunId);
+        if (local) return local;
+      }
     }
 
     const decision = this.#route(chat, text, { hasImage: images.length > 0, override, category });
@@ -311,6 +327,149 @@ class GuideAgent {
     this.chats.save();
     this.emit('usage:update', {});
     this.emit('chat:done', { chatId, runId, message: assistant, running: this.isRunning(chatId) });
+    return assistant;
+  }
+
+  // ---------- Ohara-AI: o modelo local lê e faz coisas no PC ----------
+
+  #forOharaAi(text) {
+    const config = this.getConfig();
+    if (config.ollama?.enabled === false || config.providers?.ollama?.enabled === false || config.ollama?.oharaAi === false) return false;
+    const av = this.getAvailable();
+    const ready = av?.has ? av.has('ollama') : Array.isArray(av) && av.includes('ollama');
+    return ready && (asksPcAction(text) || asksPcInfo(text));
+  }
+
+  #actionCtx() {
+    if (this.actionCtxOverride) return this.actionCtxOverride;
+    return {
+      schedule: (texto, ms) => {
+        const t = setTimeout(() => this.notify?.('Lembrete da Ohara', texto), ms);
+        t.unref?.();
+        return Date.now() + ms;
+      },
+    };
+  }
+
+  /**
+   * Responde com a Ohara-AI. Devolve null (sem deixar rastro na conversa) quando ela não sabe ou o modelo local
+   * falhou antes de fazer qualquer coisa: aí o pedido segue para as outras IAs, pelo roteador de sempre.
+   */
+  async #oharaAi(chat, text, clientRunId) {
+    const config = { ...this.getConfig(), edition: 'guia' };
+    const userIndex = chat.messages.length;
+    const titleBefore = chat.title;
+    chat.messages.push({ role: 'user', text, images: [], at: Date.now() });
+    if (chat.title === 'Nova conversa') chat.title = clip(text.replace(/\s+/g, ' '), 48);
+    const runId = clientRunId || crypto.randomUUID();
+    const action = asksPcAction(text);
+    const route = {
+      provider: 'ollama',
+      model: config.ollama?.model,
+      modelLabel: 'Ohara-AI (local)',
+      category: 'pc',
+      label: action ? 'Ohara-AI: ação no PC' : 'Ohara-AI: consulta do PC',
+      reasons: [action ? 'ação no PC: a Ohara-AI faz sozinha (o arriscado pede confirmação)' : 'consulta do PC: a Ohara-AI lê sozinha'],
+    };
+    const assistant = { id: runId, role: 'assistant', text: '', provider: 'ollama', model: route.modelLabel, route, tools: [], pending: true, at: Date.now() };
+    chat.messages.push(assistant);
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('chat:route', { chatId: chat.id, runId, route });
+
+    const ac = new AbortController();
+    this.running.set(runId, { chatId: chat.id, ac });
+    const onEvent = (ev) => {
+      if (ev.kind === 'tool') assistant.tools.push(ev.text);
+      this.emit('chat:event', { chatId: chat.id, runId, ...ev });
+    };
+    let result;
+    try {
+      result = await this.localChat({
+        config,
+        history: chat.messages.slice(0, userIndex),
+        text,
+        signal: ac.signal,
+        onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+        onStep: (t) => onEvent({ kind: 'tool', text: t }),
+        actionCtx: this.#actionCtx(),
+      });
+    } catch (err) {
+      result = { text: '', error: ac.signal.aborted ? 'Cancelado.' : err.message };
+    } finally {
+      this.running.delete(runId);
+    }
+    const didSomething = !!result?.pending?.length || !!result?.done?.length;
+    if (!ac.signal.aborted && (result?.consult || (result?.error && !didSomething))) {
+      chat.messages.splice(userIndex, 2);
+      chat.title = titleBefore;
+      this.chats.save();
+      return null;
+    }
+    delete assistant.pending;
+    assistant.text = result.text || '';
+    assistant.error = ac.signal.aborted ? 'Cancelado.' : result.error || null;
+    assistant.tokens = result.tokens || {};
+    if (result.pending?.length) {
+      assistant.pcActions = toPending(result.pending);
+      if (!/confirm/i.test(assistant.text)) assistant.text = assistant.text ? assistant.text + '\n\n' + askLine(assistant.pcActions) : askLine(assistant.pcActions);
+    }
+    try {
+      this.usage.record('ollama', config.ollama?.model || 'ollama', assistant.tokens, 'chat');
+    } catch { /* contabilidade é secundária */ }
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('usage:update', {});
+    this.emit('chat:done', { chatId: chat.id, runId, message: assistant, running: this.isRunning(chat.id) });
+    return assistant;
+  }
+
+  #findAction(chatId, messageId, index = 0) {
+    const chat = this.get(chatId);
+    const msg = chat?.messages.find((m) => m.id === messageId);
+    const action = msg?.pcActions?.[index];
+    if (!action) throw new Error('Ação não encontrada.');
+    return { chat, msg, action };
+  }
+
+  /** Botão "Confirmar": roda o que ficou guardado na mensagem (a tela só diz qual item). */
+  async confirmPcAction(chatId, messageId, index = 0) {
+    const { chat, msg, action } = this.#findAction(chatId, messageId, index);
+    const onChange = () => {
+      chat.updatedAt = Date.now();
+      this.chats.save();
+      this.emit('chat:message', { chatId, message: msg });
+    };
+    return runPending(action, defaultCtx(this.#actionCtx()), { onChange });
+  }
+
+  cancelPcAction(chatId, messageId, index = 0) {
+    const { msg, action } = this.#findAction(chatId, messageId, index);
+    if (action.status !== 'pending') return action;
+    action.status = 'cancelled';
+    this.chats.save();
+    this.emit('chat:message', { chatId, message: msg });
+    return action;
+  }
+
+  // "confirma"/"pode"/"sim" faz as ações pendentes da última resposta; "cancela"/"não" descarta. Sem IA.
+  async #tryActionReply(chat, text, clientRunId) {
+    const last = [...chat.messages].reverse().find((m) => m.role === 'assistant');
+    const onChange = () => {
+      this.chats.save();
+      this.emit('chat:message', { chatId: chat.id, message: last });
+    };
+    const reply = await replyToPending(last, text, defaultCtx(this.#actionCtx()), { onChange });
+    if (!reply) return null;
+    const runId = clientRunId || crypto.randomUUID();
+    const route = { provider: 'local', model: 'ação local', modelLabel: 'ação local', category: 'pc', label: 'Ação no PC', reasons: [reply.intent === 'cancel' ? 'cancelou a ação pendente, sem IA' : 'confirmou a ação pendente, sem IA'] };
+    chat.messages.push({ role: 'user', text, images: [], at: Date.now() });
+    const assistant = { id: runId, role: 'assistant', text: reply.lines.join('\n'), provider: 'local', model: 'ação local', route, tools: [], at: Date.now() };
+    chat.messages.push(assistant);
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('chat:route', { chatId: chat.id, runId, route });
+    this.emit('chat:done', { chatId: chat.id, runId, message: assistant, running: this.isRunning(chat.id) });
     return assistant;
   }
 

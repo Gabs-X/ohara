@@ -196,6 +196,8 @@ function renderPcActions(wrap, m) {
   box.querySelectorAll('.pc-action').forEach((row) => {
     const i = Number(row.dataset.i);
     row.querySelector('[data-a=ok]')?.addEventListener('click', async (e) => {
+      // Só clique de verdade (mouse/teclado): clique gerado por script não confirma ação no PC.
+      if (!e.isTrusted) return;
       e.target.disabled = true;
       const r = await central.pcActionConfirm(state.chatId, m.id, i);
       if (!r?.ok) row.querySelector('.what').insertAdjacentHTML('afterend', `<span class="state">⚠️ ${escapeHtml(r?.error || 'falhou')}</span>`);

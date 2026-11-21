@@ -60,6 +60,24 @@ function systemPrompt(config, { project, actions = false } = {}) {
 
 const clip = (t, n) => (String(t).length > n ? `${String(t).slice(0, n)}…` : String(t));
 
+// Os textos foram escritos para a Ohara do Gabriel. Em outra pessoa (config.userName) ou no Ohara Guia
+// (config.edition === 'guia'), troca o nome e as menções ao Claude no Orca, que lá não existe.
+function personalize(text, config = {}) {
+  let t = String(text);
+  if (config.edition === 'guia') {
+    t = t
+      .replace(/a Ohara manda para o Claude no Orca/g, 'a Ohara Guia manda para as outras IAs dela')
+      .replace(/fica com o Claude no Orca/g, 'fica com as outras IAs da Ohara Guia (Claude, Codex ou Gemini)')
+      .replace(/fica com o Claude e que basta ele pedir "manda pro Claude"/g, 'fica com as outras IAs da Ohara Guia e que basta pedir de novo')
+      .replace(/basta ele pedir "manda pro Claude"/g, 'basta pedir de novo')
+      .replace(/assistente pessoal do Gabriel rodando no PC dele \(Windows 11\)/g, `assistente de ${config.userName || 'quem usa este PC'} rodando no PC (Windows)`);
+  }
+  const who = String(config.userName || '').trim();
+  if (who && who !== 'Gabriel') t = t.replace(/\bGabriel\b/g, who);
+  else if (config.edition === 'guia' && !who) t = t.replace(/\bGabriel\b/g, 'a pessoa');
+  return t;
+}
+
 // Últimas mensagens que cabem no orçamento, da mais antiga para a mais nova.
 function buildHistory(messages) {
   const out = [];
@@ -316,6 +334,15 @@ function pcToolsFor(text) {
   return prefetch;
 }
 
+// A ferramenta de ação devolveu { feito: "..." } (fez de verdade)? Pendente vem com feito: false.
+function actionDone(content) {
+  try {
+    return typeof JSON.parse(content).feito === 'string';
+  } catch {
+    return false; // resultado cortado: na dúvida, não conta como feito
+  }
+}
+
 function needsReview({ text, draft, used = [] }) {
   if (used.length) return true;
   const q = plainText(text);
@@ -377,7 +404,7 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   // Pedido de ação no PC (volume, arquivos, fechar programa, desligar...): ela ganha as ferramentas de ação
   // deste assunto. As arriscadas não rodam: viram pedidos pendentes (pending) para ele confirmar.
   const actionNames = o.tools !== false && o.actions !== false ? actionToolsFor(text) : [];
-  const messages = [{ role: 'system', content: systemPrompt(config, { project, actions: actionNames.length > 0 }) }, ...buildHistory(history), { role: 'user', content: text }];
+  const messages = [{ role: 'system', content: personalize(systemPrompt(config, { project, actions: actionNames.length > 0 }), config) }, ...buildHistory(history), { role: 'user', content: text }];
   const pending = [];
   // Revisão: true = sempre, false = nunca, 'auto' (padrão) = só quando há risco (ver needsReview).
   const reviewMode = o.review === true || o.review === false ? o.review : 'auto';
@@ -434,7 +461,7 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
         format: 'json',
         temperature: 0,
         messages: [
-          { role: 'system', content: REVIEW_PROMPT },
+          { role: 'system', content: personalize(REVIEW_PROMPT, config) },
           {
             role: 'user',
             content: [
@@ -468,7 +495,7 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
     text: final.text,
     tokens: { input: final.input, cached: 0, output: final.output, costUsd: 0 },
     pending, // ações arriscadas esperando a confirmação dele
-    done: (draft.used || []).filter((u) => ACTION_NAMES.has(u.name) && /"feito"/.test(u.content)).map((u) => ({ name: u.name, args: u.args })),
+    done: (draft.used || []).filter((u) => ACTION_NAMES.has(u.name) && actionDone(u.content)).map((u) => ({ name: u.name, args: u.args })),
   };
 }
 
@@ -493,4 +520,4 @@ async function warmLocal(config) {
   }
 }
 
-module.exports = { warmLocal, needsReview, liveGate, pcToolsFor, chatLocal, decideLocal, briefLocal, buildHistory, systemPrompt, readMemory, draftWithTools };
+module.exports = { personalize, warmLocal, needsReview, liveGate, pcToolsFor, chatLocal, decideLocal, briefLocal, buildHistory, systemPrompt, readMemory, draftWithTools };

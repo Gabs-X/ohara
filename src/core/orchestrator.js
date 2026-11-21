@@ -12,7 +12,7 @@ const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
 const { asksPcInfo } = require('./pc-tools');
-const { asksPcAction, executeAction, defaultCtx, PENDING_TTL } = require('./pc-actions');
+const { asksPcAction, defaultCtx, runPending, replyToPending, toPending, askLine } = require('./pc-actions');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
 const { wantsBrowser, needsBrowser, chromeNote, chromeIssueNote, findChrome, CODEX_BROWSER_NOTE } = require('../integrations/chrome');
@@ -523,12 +523,8 @@ class Orchestrator {
     assistant.tokens = result.tokens;
     // Ações arriscadas que ela pediu: ficam na mensagem, esperando o botão "Confirmar" (ou "confirma").
     if (result.pending?.length) {
-      assistant.pcActions = result.pending.map((a) => ({ ...a, status: 'pending', at: Date.now() }));
-      if (!/confirm/i.test(assistant.text)) {
-        const list = assistant.pcActions.map((a) => `**${a.resumo}**`).join(', ');
-        const ask = `Para fazer: ${list}. Confirme no botão ou responda "confirma".`;
-        assistant.text = assistant.text ? `${assistant.text}\n\n${ask}` : ask;
-      }
+      assistant.pcActions = toPending(result.pending);
+      if (!/confirm/i.test(assistant.text)) assistant.text = assistant.text ? `${assistant.text}\n\n${askLine(assistant.pcActions)}` : askLine(assistant.pcActions);
     }
     // Rascunho para contato vale mesmo quando o pedido não citou o WhatsApp ("envie a mensagem").
     const hasDraft = !!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text);
@@ -906,24 +902,12 @@ class Orchestrator {
    */
   async confirmPcAction(chatId, messageId, index = 0) {
     const { chat, msg, action } = this.#findAction(chatId, messageId, index);
-    if (action.status === 'done') return action;
-    if (action.status === 'running') throw new Error('Já está fazendo.');
-    if (action.status !== 'pending') throw new Error('Essa ação não está mais esperando confirmação.');
-    if (Date.now() - (action.at || 0) > PENDING_TTL) {
-      action.status = 'expired';
+    const onChange = () => {
+      chat.updatedAt = Date.now();
       this.chats.save();
       this.emit('chat:message', { chatId, message: msg });
-      throw new Error('O pedido expirou (vale por 10 minutos). Peça de novo.');
-    }
-    action.status = 'running';
-    this.emit('chat:message', { chatId, message: msg });
-    const r = await executeAction(action.name, action.args, defaultCtx(this.#actionCtx()));
-    Object.assign(action, r.erro ? { status: 'error', error: r.erro } : { status: 'done', result: r.feito || 'feito', doneAt: Date.now() });
-    chat.updatedAt = Date.now();
-    this.chats.save();
-    this.emit('chat:message', { chatId, message: msg });
-    if (action.status === 'error') throw new Error(action.error);
-    return action;
+    };
+    return runPending(action, defaultCtx(this.#actionCtx()), { onChange });
   }
 
   cancelPcAction(chatId, messageId, index = 0) {
@@ -938,31 +922,16 @@ class Orchestrator {
   // "confirma", "pode", "sim" → faz as ações pendentes da última resposta; "cancela", "não" → descarta.
   async #tryActionReply(chat, text, clientRunId, source) {
     const last = [...chat.messages].reverse().find((m) => m.role === 'assistant');
-    const open = (last?.pcActions || []).map((a, i) => ({ a, i })).filter(({ a }) => a.status === 'pending' && Date.now() - (a.at || 0) <= PENDING_TTL);
-    if (!open.length) return null;
-    const plain = normalize(text).trim();
-    if (plain.split(/\s+/).length > 6) return null;
-    const cancel = /^(nao|n|cancel\w*|deixa( pra la)?|esquece|nem|para|melhor nao|nao precisa)\b/.test(plain);
-    const yes = !cancel && /^(sim|s|pode( sim| fazer| ir)?|confirm\w*|faz( isso)?|faca|manda( ver)?|ok|okay|beleza|blz|isso|vai|bora|claro|autorizo|certo|com certeza)\b/.test(plain);
-    if (!cancel && !yes) return null;
+    const onChange = () => {
+      this.chats.save();
+      this.emit('chat:message', { chatId: chat.id, message: last });
+    };
+    const reply = await replyToPending(last, text, defaultCtx(this.#actionCtx()), { onChange });
+    if (!reply) return null;
     delete chat.pendingImprovement; // "sim" aqui é para a ação, não para a oferta de melhoria
-
-    const lines = [];
-    for (const { a, i } of open) {
-      if (cancel) {
-        this.cancelPcAction(chat.id, last.id, i);
-        lines.push(`Beleza, não vou ${a.resumo.charAt(0).toLowerCase()}${a.resumo.slice(1)}.`);
-        continue;
-      }
-      try {
-        const done = await this.confirmPcAction(chat.id, last.id, i);
-        lines.push(`Pronto: ${done.result}.`);
-      } catch (err) {
-        lines.push(`Não consegui (${a.resumo}): ${err.message}`);
-      }
-    }
+    const { intent, lines } = reply;
     const runId = clientRunId || crypto.randomUUID();
-    const route = { provider: 'local', model: 'ação local', category: 'local', label: 'Ação no PC', reasons: [cancel ? 'cancelou a ação pendente, sem IA' : 'confirmou a ação pendente, sem IA'] };
+    const route = { provider: 'local', model: 'ação local', category: 'local', label: 'Ação no PC', reasons: [intent === 'cancel' ? 'cancelou a ação pendente, sem IA' : 'confirmou a ação pendente, sem IA'] };
     chat.messages.push({ role: 'user', text, images: [], at: Date.now() });
     const assistant = { id: runId, role: 'assistant', text: lines.join('\n'), provider: 'local', model: 'ação local', route, tools: [], at: Date.now() };
     chat.messages.push(assistant);

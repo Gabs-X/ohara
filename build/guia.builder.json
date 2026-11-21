@@ -25,7 +25,14 @@
     "src/core/doc-index.js",
     "src/core/doc-text.js",
     "src/core/local-llm.js",
-    "src/core/local-tools.js"
+    "src/core/local-tools.js",
+    "src/core/ipc-guard.js",
+    "src/core/ps.js",
+    "src/core/pc-tools.js",
+    "src/core/pc-actions.js",
+    "src/core/local-chat.js",
+    "src/core/brief.js",
+    "src/core/ollama-pull.js"
   ],
   "extraMetadata": {
     "main": "src/guia/main.js",
