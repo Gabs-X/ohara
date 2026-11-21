@@ -102,20 +102,92 @@ function markRunning(chatId, runId, on) {
   updateSend();
 }
 
+// Apagar pede um segundo clique: o botão vira "Apagar?" por 4 s (sem janela de diálogo, que trava o app).
+function armDelete(btn, onConfirm, label = 'Apagar?') {
+  if (btn.dataset.armed === '1') {
+    clearTimeout(Number(btn.dataset.timer));
+    onConfirm();
+    return;
+  }
+  const original = btn.innerHTML;
+  btn.dataset.armed = '1';
+  btn.classList.add('armed');
+  btn.textContent = label;
+  btn.dataset.timer = String(setTimeout(() => {
+    btn.dataset.armed = '';
+    btn.classList.remove('armed');
+    btn.innerHTML = original;
+  }, 4000));
+}
+
+async function deleteChats(ids) {
+  for (const id of ids) await tryCall(guia.deleteChat(id));
+  if (ids.includes(state.chatId)) newChat();
+  updateDeleteButton();
+  refreshChats();
+}
+
+// Modo "Selecionar": marca várias conversas e apaga de uma vez.
+state.selecting = false;
+state.selected = new Set();
+function setSelecting(on) {
+  state.selecting = on;
+  state.selected.clear();
+  $('#bulk-bar').hidden = !on;
+  $('#select-chats').hidden = on;
+  updateBulkBar();
+  refreshChats();
+}
+function updateBulkBar() {
+  const n = state.selected.size;
+  $('#bulk-count').textContent = n === 1 ? '1 marcada' : `${n} marcadas`;
+  const del = $('#bulk-delete');
+  del.disabled = !n;
+  del.textContent = n ? `Apagar ${n}` : 'Apagar';
+  del.dataset.armed = '';
+  del.classList.remove('armed');
+}
+$('#select-chats').addEventListener('click', () => setSelecting(true));
+$('#bulk-cancel').addEventListener('click', () => setSelecting(false));
+$('#bulk-delete').addEventListener('click', (e) => {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  armDelete(e.currentTarget, async () => {
+    await deleteChats(ids);
+    setSelecting(false);
+  }, `Apagar ${ids.length}? Confirma`);
+});
+function updateDeleteButton() {
+  $('#delete-chat').hidden = !state.chatId;
+}
+$('#delete-chat').addEventListener('click', (e) => {
+  if (!state.chatId) return;
+  const id = state.chatId;
+  armDelete(e.currentTarget, () => deleteChats([id]), 'Apagar esta conversa?');
+});
+
 async function refreshChats() {
   const chats = (await tryCall(guia.listChats())) || [];
   const list = $('#chat-list');
   list.innerHTML = '';
   for (const c of chats) {
     const item = document.createElement('div');
-    item.className = `chat-item${c.id === state.chatId ? ' active' : ''}`;
-    item.innerHTML = `<span title="${esc(c.cwd || 'sem projeto')}">${isBusy(c.id) ? '⏳ ' : ''}${esc(c.title)}</span><button class="del" title="Apagar conversa">✕</button>`;
-    item.addEventListener('click', () => openChat(c.id));
-    item.querySelector('.del').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await tryCall(guia.deleteChat(c.id));
-      if (c.id === state.chatId) newChat();
+    const picked = state.selected.has(c.id);
+    item.className = `chat-item${c.id === state.chatId ? ' active' : ''}${state.selecting ? ' selecting' : ''}${picked ? ' picked' : ''}`;
+    const label = `<span title="${esc(c.cwd || 'sem projeto')}">${isBusy(c.id) ? '⏳ ' : ''}${esc(c.title)}</span>`;
+    item.innerHTML = state.selecting
+      ? `<input type="checkbox" class="pick" ${picked ? 'checked' : ''} aria-label="Marcar" />${label}`
+      : `${label}<button class="del" title="Apagar conversa">✕</button>`;
+    item.addEventListener('click', () => {
+      if (!state.selecting) return openChat(c.id);
+      if (state.selected.has(c.id)) state.selected.delete(c.id);
+      else state.selected.add(c.id);
+      updateBulkBar();
       refreshChats();
+    });
+    item.querySelector('.del')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      armDelete(e.currentTarget, () => deleteChats([c.id]), 'Apagar?');
     });
     list.appendChild(item);
   }
@@ -228,6 +300,7 @@ function renderMessages() {
   const msgs = state.chat?.messages || [];
   $('#empty').hidden = msgs.length > 0;
   $('#chat-title').textContent = state.chat?.title || 'Nova conversa';
+  updateDeleteButton();
   for (const m of msgs) {
     // Resposta ainda rodando que começou fora desta tela (etapa de plano): passa a acompanhar ao vivo.
     if (m.pending && !state.lives.has(m.id)) {
