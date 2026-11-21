@@ -369,4 +369,4 @@ function asksPcInfo(text) {
   return PC_TOPIC_RE.test(t) && !PC_CHANGE_RE.test(t) && !PC_SITES_RE.test(t);
 }
 
-module.exports = { TOOL_DEFS, runPcTool, asksPcInfo, guessTools, resolveFolder, findBrowsers, armazenamento, sistema, processos, navegadores, programas, rede, pasta };
+module.exports = { psJson, TOOL_DEFS, runPcTool, asksPcInfo, guessTools, resolveFolder, findBrowsers, armazenamento, sistema, processos, navegadores, programas, rede, pasta };

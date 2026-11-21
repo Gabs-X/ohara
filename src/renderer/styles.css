@@ -234,6 +234,14 @@ textarea { width: 100%; resize: none; border: 0; background: none; outline: none
 .tag.local, .tag.ollama, b.ollama, .tag.orca, b.orca { color: #25d3a6; border-color: color-mix(in srgb, #25d3a6 40%, transparent); }
 .route-badge b.local { color: #25d3a6; }
 .improve-offer { margin-top: 8px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border: 1px dashed var(--accent); border-radius: 10px; font-size: 13px; }
+/* Ações da Ohara-AI no PC esperando confirmação */
+.pc-actions { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.pc-action { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; font-size: 13px; }
+.pc-action .what { flex: 1 1 220px; }
+.pc-action .state { color: var(--muted); }
+.pc-action.done, .pc-action.cancelled, .pc-action.expired { border-color: transparent; opacity: .85; }
+.pc-action.error { border-color: var(--danger); }
+.pc-action.error .state { color: var(--danger); }
 
 #btn-voice.rec { background: rgba(255, 92, 122, .25); border-color: rgba(255, 92, 122, .7); }
 

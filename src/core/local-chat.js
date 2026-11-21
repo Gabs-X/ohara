@@ -7,6 +7,7 @@ const path = require('path');
 const { TOOL_DEFS, runPcTool, guessTools, asksPcInfo } = require('./pc-tools');
 const { ollamaUrl, keepAlive } = require('./providers/ollama');
 const { BRIEF_PROMPT, parseBrief, briefInput } = require('./brief');
+const { ACTION_DEFS, ACTION_NAMES, actionToolsFor, requestAction, defaultCtx } = require('./pc-actions');
 
 const MAX_HISTORY_CHARS = 14_000; // ~4 mil tokens de histórico; cabe folgado nos 16 mil do contexto
 const MAX_MSG_CHARS = 2500;
@@ -29,7 +30,16 @@ function readMemory(config) {
   }
 }
 
-function systemPrompt(config, { project } = {}) {
+// Com ferramentas de ação neste pedido: ela FAZ coisas no PC, com confirmação para o que é arriscado.
+const ACTIONS_NOTE = [
+  'Neste pedido você também FAZ coisas no PC com as ferramentas de ação. Chame a ferramenta; não descreva como ele faria.',
+  'Ações livres (volume, mídia, print, copiar, lembrete, bloquear a tela, abrir arquivo, pasta ou configuração, buscar e ler arquivos, criar pasta, cancelar desligamento) rodam na hora: depois diga em uma frase o que fez, com o que a ferramenta devolveu.',
+  'Ações arriscadas (fechar programa, mover, renomear, mandar para a Lixeira, limpar temporários, esvaziar a Lixeira, desligar, reiniciar, suspender, abrir um executável) só acontecem depois que ele confirmar: chame a ferramenta (ela registra o pedido) e diga em uma frase o que vai ser feito, pedindo para ele confirmar no botão ou respondendo "confirma". Nunca diga que já fez.',
+  'Para arquivos, use primeiro buscar_arquivos para achar o caminho exato. Se achar mais de um que sirva, pergunte qual antes de mover, renomear ou apagar. Para fechar um programa sem saber o nome do processo, consulte "processos".',
+  'Se a ferramenta devolver "erro", conte o motivo em uma frase. Nunca diga que fez algo que a ferramenta não confirmou com "feito".',
+].join('\n');
+
+function systemPrompt(config, { project, actions = false } = {}) {
   const mem = readMemory(config);
   return [
     'Você é a Ohara-AI, a IA local da Ohara, assistente pessoal do Gabriel rodando no PC dele (Windows 11). Responda sempre em português do Brasil, de forma direta.',
@@ -37,7 +47,9 @@ function systemPrompt(config, { project } = {}) {
     'Seja assertiva: responda primeiro o que ele perguntou, tome posição quando ele pedir opinião, sem rodeios e sem pedir desculpas à toa.',
     'Aqui no chat você conversa (responde, explica, escreve, resume, planeja) e CONSULTA o PC dele com ferramentas só de leitura: armazenamento, sistema (CPU, RAM, bateria), processos, navegadores, programas instalados, rede e pastas.',
     'Quando ele perguntar algo do PC (espaço em disco, memória, o que está aberto, que navegador tem, o que ocupa a pasta Downloads...), chame a ferramenta certa e responda com os números que ela devolveu, em GB e de forma curta. Nunca chute números do PC sem consultar.',
-    'Você NÃO altera nada: não apaga, não instala, não fecha programas, não roda comandos, não mexe em código e não navega na internet. Pedidos assim a Ohara manda para o Claude no Orca antes de chegarem a você. Se mesmo assim chegar um, nunca diga que encaminhou, que vai fazer ou que fez: diga em uma frase que isso fica com o Claude e que basta ele pedir "manda pro Claude". Pode sugerir o que ele mesmo pode fazer (ex.: quais pastas limpar).',
+    actions
+      ? ACTIONS_NOTE
+      : 'Neste pedido você NÃO altera nada: não apaga, não instala, não fecha programas, não roda comandos, não mexe em código e não navega na internet. Ações no PC (volume, print, lembrete, arquivos, fechar programa, limpar, desligar) a Ohara libera quando o pedido é sobre isso; o resto (instalar, código, sites) fica com o Claude no Orca. Se chegar um pedido assim, nunca diga que encaminhou, que vai fazer ou que fez: diga em uma frase que isso fica com o Claude e que basta ele pedir "manda pro Claude".',
     'Se não souber algo ou não tiver certeza, diga isso em vez de inventar. Nunca invente fatos, links, números ou nomes de arquivos.',
     'Você não está sozinha: se for uma pergunta de fato, técnica ou de informação atual (não sobre a vida pessoal dele) que você não sabe responder com segurança, não chute nem devolva "não sei". Responda só [[consultar_claude: o que falta saber, em poucas palavras]] e nada mais: a Ohara pergunta ao Claude e ele vê a resposta dele.',
     config.selfRepo ? `Você pode melhorar a si mesma: o seu código está em ${config.selfRepo}. Quando um pedido esbarrar em algo que você ainda não sabe fazer (uma integração ou recurso que falta), explique em uma frase o que falta, ofereça-se para se alterar e, no fim da resposta, inclua exatamente uma linha: [[melhoria: o que mudar em você, em uma frase objetiva]]. Essa linha não aparece para ele; se ele aceitar, o Claude implementa no Orca. Só ofereça quando não der para resolver de outro jeito.` : '',
@@ -159,7 +171,7 @@ async function ollamaToolCall({ config, messages, signal, tools }) {
  * @param {Function} [o.call] troca a chamada ao Ollama (testes)
  * @param {Function} [o.run] troca a execução das ferramentas (testes)
  */
-async function draftWithTools({ config, messages, signal, onStep, prefetch = [], call = ollamaToolCall, run = runPcTool }) {
+async function draftWithTools({ config, messages, signal, onStep, prefetch = [], call = ollamaToolCall, run = runPcTool, defs = TOOL_DEFS, label = (n) => `Ohara-AI: consultando o PC (${n})` }) {
   const msgs = [...messages];
   const used = [];
   let input = 0;
@@ -167,7 +179,7 @@ async function draftWithTools({ config, messages, signal, onStep, prefetch = [],
   const exec = async (calls) => {
     msgs.push({ role: 'assistant', content: '', tool_calls: calls.map((c) => ({ function: { name: c.name, arguments: c.args } })) });
     for (const c of calls) {
-      onStep?.(`Ohara-AI: consultando o PC (${c.name})`);
+      onStep?.(label(c.name));
       const content = clip(JSON.stringify(await run(c.name, c.args)), MAX_TOOL_CHARS);
       used.push({ name: c.name, args: c.args, content });
       msgs.push({ role: 'tool', tool_name: c.name, content });
@@ -177,7 +189,7 @@ async function draftWithTools({ config, messages, signal, onStep, prefetch = [],
   if (prefetch.length) await exec(prefetch);
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     // Última rodada sem ferramentas: obriga a responder com o que já leu.
-    const r = await call({ config, messages: msgs, signal, tools: round < MAX_TOOL_ROUNDS ? TOOL_DEFS : undefined });
+    const r = await call({ config, messages: msgs, signal, tools: round < MAX_TOOL_ROUNDS ? defs : undefined });
     input += r.input;
     output += r.output;
     const calls = r.message.tool_calls || [];
@@ -268,7 +280,7 @@ async function briefLocal({ config, history, text, projects, hint, signal }) {
 
 const REVIEW_PROMPT = [
   'Você revisa a resposta que a Ohara-AI (assistente local do Gabriel) escreveu, antes de ele ver. Ache os problemas e reescreva.',
-  '1. Promessa de ação: a Ohara-AI conversa e só LÊ informações do PC pelas ferramentas (o que ela leu está em "Dados lidos do PC"); dizer que consultou ou verificou isso é correto. Ela não executa comandos, não altera nem apaga arquivos, não navega e não encaminha nada sozinha. Toda frase que diga ou dê a entender que ela fez, está fazendo ou vai fazer algo assim é problema, inclusive no plural ("vou ajustar", "vamos ajustar", "encaminhei", "já mudei"). Se o pedido exigir isso, a resposta é uma frase dizendo que fica com o Claude e que basta ele pedir "manda pro Claude".',
+  '1. Promessa de ação: a Ohara-AI conversa e só LÊ informações do PC pelas ferramentas (o que ela leu está em "Dados lidos do PC"); dizer que consultou ou verificou isso é correto. Ela não executa comandos, não altera nem apaga arquivos, não navega e não encaminha nada sozinha. Toda frase que diga ou dê a entender que ela fez, está fazendo ou vai fazer algo assim é problema, inclusive no plural ("vou ajustar", "vamos ajustar", "encaminhei", "já mudei"). Se o pedido exigir isso, a resposta é uma frase dizendo que fica com o Claude e que basta ele pedir "manda pro Claude". EXCEÇÃO, ações no PC pelas ferramentas: o que aparece em "Dados lidos do PC e ações feitas agora" com "feito" foi feito de verdade e a resposta deve dizer que fez; o que aparece com "aguardando_confirmacao" ainda NÃO foi feito, e a resposta deve dizer o que vai ser feito e pedir para ele confirmar (no botão ou respondendo "confirma"), nunca dizer que já fez.',
   '2. Invenção: fato pessoal do Gabriel (nomes, datas, preferências, projetos) que não está na conversa nem na memória é invenção; troque por "não sei" e peça para ele contar. O mesmo para números, caminhos, arquivos e links sem base, ou usados fora do sentido original. Números e nomes que aparecem em "Dados lidos do PC" têm base: confira se batem com a resposta e corrija se não baterem.',
   '3. Em cima do muro: se ele pediu opinião ou escolha, a resposta tem que escolher um lado logo na primeira frase e dar o motivo principal. "Depende" ou "escolha de acordo com suas necessidades" é problema.',
   '4. Enrolação: conselhos, avisos e frases genéricas que ele não pediu, e desculpas à toa.',
@@ -360,9 +372,13 @@ function liveGate(onDelta) {
  * @param {(chunk:string)=>void} [o.onDelta]
  * @param {(text:string)=>void} [o.onStep] etapa em andamento, para a tela
  */
-async function chatLocal({ config, history, text, project, signal, onDelta, onStep }) {
+async function chatLocal({ config, history, text, project, signal, onDelta, onStep, actionCtx = null }) {
   const o = config.ollama || {};
-  const messages = [{ role: 'system', content: systemPrompt(config, { project }) }, ...buildHistory(history), { role: 'user', content: text }];
+  // Pedido de ação no PC (volume, arquivos, fechar programa, desligar...): ela ganha as ferramentas de ação
+  // deste assunto. As arriscadas não rodam: viram pedidos pendentes (pending) para ele confirmar.
+  const actionNames = o.tools !== false && o.actions !== false ? actionToolsFor(text) : [];
+  const messages = [{ role: 'system', content: systemPrompt(config, { project, actions: actionNames.length > 0 }) }, ...buildHistory(history), { role: 'user', content: text }];
+  const pending = [];
   // Revisão: true = sempre, false = nunca, 'auto' (padrão) = só quando há risco (ver needsReview).
   const reviewMode = o.review === true || o.review === false ? o.review : 'auto';
   let draft = null;
@@ -370,9 +386,13 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   // Ferramentas do PC só quando a pergunta é sobre o PC: a chamada com ferramentas não tem streaming
   // e leva as definições junto. Conversa comum vai direto, aparecendo na tela enquanto é escrita.
   const prefetch = pcToolsFor(text);
-  if (o.tools !== false && prefetch) {
+  if (o.tools !== false && (prefetch || actionNames.length)) {
+    const ctx = defaultCtx(actionCtx || {});
+    const defs = actionNames.length ? [...TOOL_DEFS, ...ACTION_DEFS.filter((d) => actionNames.includes(d.function.name))] : TOOL_DEFS;
+    const run = (name, args) => (ACTION_NAMES.has(name) ? (actionNames.includes(name) ? requestAction(name, args, { ctx, pending }) : { erro: 'essa ação não vale para este pedido' }) : runPcTool(name, args));
+    const label = (n) => (ACTION_NAMES.has(n) ? 'Ohara-AI: ' + n.replace(/_/g, ' ') : 'Ohara-AI: consultando o PC (' + n + ')');
     try {
-      draft = await draftWithTools({ config, messages, signal, onStep, prefetch });
+      draft = await draftWithTools({ config, messages, signal, onStep, prefetch: prefetch || [], defs, run, label });
       if (!draft.text) draft = null;
     } catch (e) {
       if (signal?.aborted || e.fatal) throw e;
@@ -398,7 +418,10 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   let final = draft;
   // Blocos estruturados (WhatsApp, [[ignorar]]) não passam pela revisão: ela poderia estragar o formato.
   const structured = /\[\[(whatsapp|ignorar)/i.test(draft.text || '');
-  const review = reviewMode !== false && !!draft.text && !structured && (reviewMode === true || needsReview({ text, draft: draft.text, used: draft.used || [] }));
+  // Resposta que só relata ações no PC (sem leitura de dados): a revisão tendia a reescrever "aumentei o volume"
+  // como se ela não pudesse fazer nada. O que ela fez está garantido pela ferramenta; o texto fica como veio.
+  const onlyActions = (draft.used || []).length > 0 && draft.used.every((u) => ACTION_NAMES.has(u.name));
+  const review = reviewMode !== false && !!draft.text && !structured && !(onlyActions && reviewMode !== true) && (reviewMode === true || needsReview({ text, draft: draft.text, used: draft.used || [] }));
   if (review) {
     onStep?.('Ohara-AI: revisando a resposta');
     const offer = draft.text.match(IMPROVE_MARK_RE)?.[0] || null; // [[melhoria: ...]] só volta se a revisão confirmar
@@ -418,7 +441,7 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
               mem ? `Memória sobre o Gabriel (o que é sabido de fato):\n${mem}\n` : 'Memória sobre o Gabriel: (vazia)\n',
               `Conversa até aqui:\n${transcript(history, 6, 700) || '(início)'}\n`,
               `Pedido atual do Gabriel: ${text}\n`,
-              pcData ? `Dados lidos do PC agora pelas ferramentas:\n${pcData}\n` : '',
+              pcData ? `Dados lidos do PC e ações feitas agora pelas ferramentas:\n${pcData}\n` : '',
               `Resposta a revisar:\n${body}`,
               offer ? `\nOferta de melhoria proposta: ${offer}` : '',
             ].join('\n'),
@@ -444,6 +467,8 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
     model: o.model,
     text: final.text,
     tokens: { input: final.input, cached: 0, output: final.output, costUsd: 0 },
+    pending, // ações arriscadas esperando a confirmação dele
+    done: (draft.used || []).filter((u) => ACTION_NAMES.has(u.name) && /"feito"/.test(u.content)).map((u) => ({ name: u.name, args: u.args })),
   };
 }
 

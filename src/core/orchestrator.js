@@ -12,6 +12,7 @@ const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
 const { asksPcInfo } = require('./pc-tools');
+const { asksPcAction, executeAction, defaultCtx, PENDING_TTL } = require('./pc-actions');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
 const { wantsBrowser, needsBrowser, chromeNote, chromeIssueNote, findChrome, CODEX_BROWSER_NOTE } = require('../integrations/chrome');
@@ -80,6 +81,7 @@ const HANDOFF_VERB_RE = /\b(encaminh\w*|mand\w*|pass\w*|envi\w*|cham\w*|abr\w*|a
 const isHandoff = (plain) => HANDOFF_TARGET_RE.test(plain) && HANDOFF_VERB_RE.test(plain);
 const MAX_CONTEXT_CHARS = 9000;
 const DRAFT_STATUS = { pending: 'aguardando confirmação', sending: 'enviando', sent: 'enviada', error: 'falhou', cancelled: 'cancelada' };
+const ACTION_STATUS = { pending: 'aguardando confirmação', running: 'fazendo', done: 'feita', error: 'falhou', cancelled: 'cancelada', expired: 'expirou' };
 const DRAFT_TTL = 30 * 60_000; // "confirmado" vale para rascunhos de até 30 min atrás
 const MAX_MSG_CHARS = 1800;
 
@@ -156,7 +158,9 @@ function clip(text, max) {
 }
 
 class Orchestrator {
-  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null, ensureChrome = null }) {
+  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null, ensureChrome = null, notify = null, actionCtx = null }) {
+    this.notify = notify; // notificação do Windows (lembretes da Ohara-AI)
+    this.actionCtxOverride = actionCtx; // testes: troca PowerShell e programas das ações no PC
     this.openExternal = openExternal; // abre URLs/URIs (shell.openExternal); habilita as ações locais
     this.ensureChrome = ensureChrome; // abre o Chrome antes de pedidos de navegador, para a extensão Claude conectar
 
@@ -297,11 +301,14 @@ class Orchestrator {
     });
     const continued = (base.reasons || []).some((r) => /continua o assunto/.test(r)) && !!chat?.messages.some((m) => m.route?.provider === 'orca');
     // Só consulta o PC (espaço, memória, navegadores instalados...): a Ohara-AI lê sozinha, sem o Claude.
-    const pcInfo = config.ollama?.tools !== false && asksPcInfo(text);
+    // Ação no PC (volume, print, arquivos, fechar programa, limpar, desligar...): a Ohara-AI faz sozinha,
+    // com confirmação para o que é arriscado. Projeto e código continuam com o Claude.
+    const pcAction = config.ollama?.tools !== false && config.ollama?.actions !== false && asksPcAction(text);
+    const pcInfo = pcAction || (config.ollama?.tools !== false && asksPcInfo(text));
     // Pergunta ("tem como...?", "dá pra...?") não é ordem: quem decide é a Ohara-AI, não o verbo solto.
     const question = QUESTION_RE.test(normalize(text));
     const toAgent = !pcInfo && ((AGENT_CATEGORIES.has(base.category) && ((ACTION_RE.test(normalize(text)) && !question) || continued)) || (config.claude?.chrome !== false && needsBrowser(text)));
-    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : pcInfo ? 'consulta do PC: a Ohara-AI lê sozinha' : 'conversa: modelo local'];
+    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : pcAction ? 'ação no PC: a Ohara-AI faz sozinha (o arriscado pede confirmação)' : pcInfo ? 'consulta do PC: a Ohara-AI lê sozinha' : 'conversa: modelo local'];
     return toAgent
       ? { ...base, provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined, reasons }
       : { ...base, provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined, reasons };
@@ -328,7 +335,8 @@ class Orchestrator {
     let total = 0;
     for (const m of [...unseen].reverse()) {
       // O rascunho sai do texto; entra aqui para a IA saber o que está pronto (e não refazer à toa).
-      const drafts = (m.whatsappDrafts || []).map((d) => `\n[Mensagem de WhatsApp para "${d.to}" (${DRAFT_STATUS[d.status] || d.status}): ${clip(d.text, 600)}]`).join('');
+      const drafts = (m.whatsappDrafts || []).map((d) => `\n[Mensagem de WhatsApp para "${d.to}" (${DRAFT_STATUS[d.status] || d.status}): ${clip(d.text, 600)}]`).join('')
+        + (m.pcActions || []).map((a) => `\n[Ação no PC "${a.resumo}": ${ACTION_STATUS[a.status] || a.status}${a.error ? ` (${clip(a.error, 200)})` : ''}]`).join('');
       const line = `${m.role === 'user' ? 'Gabriel' : `Assistente (${m.provider})`}: ${clip(m.text, MAX_MSG_CHARS)}${drafts}`;
       if (total + line.length > MAX_CONTEXT_CHARS) break;
       out.unshift(line);
@@ -349,6 +357,9 @@ class Orchestrator {
     if (!images.length && (!override || override === 'auto')) {
       const reply = await this.#tryDraftReply(chat, text, clientRunId, source);
       if (reply) return reply;
+      // Ação no PC esperando confirmação e ele respondeu "confirma"/"pode"/"cancela": resolve na hora.
+      const acted = await this.#tryActionReply(chat, text, clientRunId, source);
+      if (acted) return acted;
     }
 
     // Ela se ofereceu para se alterar e ele aceitou: o Claude implementa no repositório da Ohara, pelo Orca.
@@ -372,7 +383,7 @@ class Orchestrator {
     if (decision.provider === 'ollama' && !improvement && !answered && !images.length && (!override || override === 'auto')) {
       const explicit = isHandoff(normalize(text));
       // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
-      const skip = config.ollama?.decide === false || isSmallTalk(normalize(text)) || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && asksPcInfo(text));
+      const skip = config.ollama?.decide === false || isSmallTalk(normalize(text)) || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && (asksPcInfo(text) || asksPcAction(text)));
       // Limite curto: com o Ollama lento ou travado, o pedido ficava até 3 min invisível e sem como cancelar.
       const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text, signal: AbortSignal.timeout(15_000) }).catch(() => null);
       if (explicit || verdict?.acao === 'claude') {
@@ -494,6 +505,7 @@ class Orchestrator {
           signal: ac.signal,
           onDelta: (t) => onEvent({ kind: 'delta', text: t }),
           onStep: (t) => onEvent({ kind: 'tool', text: t }),
+          actionCtx: this.#actionCtx(),
         });
         // A Ohara-AI não sabia: em vez de chutar ou devolver "não sei", pergunta ao Claude sozinha.
         if (result?.consult) result = await this.#consultClaude({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source, local: result });
@@ -509,6 +521,15 @@ class Orchestrator {
     assistant.model = result.model || decision.model;
     assistant.provider = result.provider || assistant.provider; // o Claude no chat pode ter caído para a Ohara-AI
     assistant.tokens = result.tokens;
+    // Ações arriscadas que ela pediu: ficam na mensagem, esperando o botão "Confirmar" (ou "confirma").
+    if (result.pending?.length) {
+      assistant.pcActions = result.pending.map((a) => ({ ...a, status: 'pending', at: Date.now() }));
+      if (!/confirm/i.test(assistant.text)) {
+        const list = assistant.pcActions.map((a) => `**${a.resumo}**`).join(', ');
+        const ask = `Para fazer: ${list}. Confirme no botão ou responda "confirma".`;
+        assistant.text = assistant.text ? `${assistant.text}\n\n${ask}` : ask;
+      }
+    }
     // Rascunho para contato vale mesmo quando o pedido não citou o WhatsApp ("envie a mensagem").
     const hasDraft = !!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text);
     // Por voz, conversa que não era com ela ("[[ignorar]]"): não responde nada.
@@ -855,6 +876,101 @@ class Orchestrator {
     } catch (err) {
       assistant.whatsapp = { sent: false, error: err.message };
     }
+  }
+
+  // ---------- Ações no PC com confirmação ----------
+
+  // Contexto das ações da Ohara-AI: lembretes viram notificação do Windows.
+  #actionCtx() {
+    if (this.actionCtxOverride) return this.actionCtxOverride;
+    return {
+      schedule: (texto, ms) => {
+        const t = setTimeout(() => this.notify?.('Lembrete da Ohara', texto), ms);
+        t.unref?.();
+        return Date.now() + ms;
+      },
+    };
+  }
+
+  #findAction(chatId, messageId, index = 0) {
+    const chat = this.get(chatId);
+    const msg = chat?.messages.find((m) => m.id === messageId);
+    const action = msg?.pcActions?.[index];
+    if (!action) throw new Error('Ação não encontrada.');
+    return { chat, msg, action };
+  }
+
+  /**
+   * Executa uma ação pendente. Chamado pelo botão "Confirmar" ou quando ele responde "confirma".
+   * O que roda é o que está guardado na mensagem: a tela só diz qual item confirmar.
+   */
+  async confirmPcAction(chatId, messageId, index = 0) {
+    const { chat, msg, action } = this.#findAction(chatId, messageId, index);
+    if (action.status === 'done') return action;
+    if (action.status === 'running') throw new Error('Já está fazendo.');
+    if (action.status !== 'pending') throw new Error('Essa ação não está mais esperando confirmação.');
+    if (Date.now() - (action.at || 0) > PENDING_TTL) {
+      action.status = 'expired';
+      this.chats.save();
+      this.emit('chat:message', { chatId, message: msg });
+      throw new Error('O pedido expirou (vale por 10 minutos). Peça de novo.');
+    }
+    action.status = 'running';
+    this.emit('chat:message', { chatId, message: msg });
+    const r = await executeAction(action.name, action.args, defaultCtx(this.#actionCtx()));
+    Object.assign(action, r.erro ? { status: 'error', error: r.erro } : { status: 'done', result: r.feito || 'feito', doneAt: Date.now() });
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('chat:message', { chatId, message: msg });
+    if (action.status === 'error') throw new Error(action.error);
+    return action;
+  }
+
+  cancelPcAction(chatId, messageId, index = 0) {
+    const { msg, action } = this.#findAction(chatId, messageId, index);
+    if (action.status !== 'pending') return action;
+    action.status = 'cancelled';
+    this.chats.save();
+    this.emit('chat:message', { chatId, message: msg });
+    return action;
+  }
+
+  // "confirma", "pode", "sim" → faz as ações pendentes da última resposta; "cancela", "não" → descarta.
+  async #tryActionReply(chat, text, clientRunId, source) {
+    const last = [...chat.messages].reverse().find((m) => m.role === 'assistant');
+    const open = (last?.pcActions || []).map((a, i) => ({ a, i })).filter(({ a }) => a.status === 'pending' && Date.now() - (a.at || 0) <= PENDING_TTL);
+    if (!open.length) return null;
+    const plain = normalize(text).trim();
+    if (plain.split(/\s+/).length > 6) return null;
+    const cancel = /^(nao|n|cancel\w*|deixa( pra la)?|esquece|nem|para|melhor nao|nao precisa)\b/.test(plain);
+    const yes = !cancel && /^(sim|s|pode( sim| fazer| ir)?|confirm\w*|faz( isso)?|faca|manda( ver)?|ok|okay|beleza|blz|isso|vai|bora|claro|autorizo|certo|com certeza)\b/.test(plain);
+    if (!cancel && !yes) return null;
+    delete chat.pendingImprovement; // "sim" aqui é para a ação, não para a oferta de melhoria
+
+    const lines = [];
+    for (const { a, i } of open) {
+      if (cancel) {
+        this.cancelPcAction(chat.id, last.id, i);
+        lines.push(`Beleza, não vou ${a.resumo.charAt(0).toLowerCase()}${a.resumo.slice(1)}.`);
+        continue;
+      }
+      try {
+        const done = await this.confirmPcAction(chat.id, last.id, i);
+        lines.push(`Pronto: ${done.result}.`);
+      } catch (err) {
+        lines.push(`Não consegui (${a.resumo}): ${err.message}`);
+      }
+    }
+    const runId = clientRunId || crypto.randomUUID();
+    const route = { provider: 'local', model: 'ação local', category: 'local', label: 'Ação no PC', reasons: [cancel ? 'cancelou a ação pendente, sem IA' : 'confirmou a ação pendente, sem IA'] };
+    chat.messages.push({ role: 'user', text, images: [], at: Date.now() });
+    const assistant = { id: runId, role: 'assistant', text: lines.join('\n'), provider: 'local', model: 'ação local', route, tools: [], at: Date.now() };
+    chat.messages.push(assistant);
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('chat:route', { chatId: chat.id, runId, route });
+    this.emit('chat:done', { chatId: chat.id, runId, message: assistant, source, running: this.isRunning(chat.id) });
+    return assistant;
   }
 
   #findDraft(chatId, messageId, index = 0) {

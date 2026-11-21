@@ -114,6 +114,8 @@ contextBridge.exposeInMainWorld('central', {
   whatsappWebConnect: inv('whatsapp:webConnect'),
   whatsappConfirm: inv('whatsapp:confirm'),
   whatsappCancel: inv('whatsapp:cancel'),
+  pcActionConfirm: inv('pcaction:confirm'),
+  pcActionCancel: inv('pcaction:cancel'),
   whisperStatus: inv('whisper:status'),
   whisperInstall: inv('whisper:install'),
   transcribe: inv('whisper:transcribe'),

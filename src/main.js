@@ -463,7 +463,7 @@ function notify(title, body, view = null, chatId = null) {
 }
 
 const disabledFeature = () => { throw new Error("Recurso desativado nesta versão da Ohara."); };
-const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url), ensureChrome: () => ensureChrome() });
+const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url), ensureChrome: () => ensureChrome(), notify: (t, b) => notify(t, b, 'chat') });
 const meetings = new MeetingsService({
   store: meetingsStore, usage, getConfig, emit: send, notify: (t, b) => notify(t, b, 'meetings'),
 });
@@ -1024,6 +1024,16 @@ function registerIpc() {
   handleSafe('whatsapp:webConnect', disabledFeature);
   handleSafe('whatsapp:confirm', disabledFeature);
   handleSafe('whatsapp:cancel', disabledFeature);
+  // Ações da Ohara-AI no PC que esperam confirmação: a tela só diz QUAL item confirmar; o que roda é o que
+  // ficou guardado na mensagem (a interface não consegue mandar uma ação nova).
+  const actionRef = (chatId, messageId, index) => {
+    if (typeof chatId !== 'string' || typeof messageId !== 'string') throw new Error('Pedido inválido.');
+    const i = Number(index ?? 0);
+    if (!Number.isInteger(i) || i < 0 || i > 50) throw new Error('Pedido inválido.');
+    return [chatId, messageId, i];
+  };
+  handleSafe('pcaction:confirm', (chatId, messageId, index) => orchestrator.confirmPcAction(...actionRef(chatId, messageId, index)));
+  handleSafe('pcaction:cancel', (chatId, messageId, index) => orchestrator.cancelPcAction(...actionRef(chatId, messageId, index)));
   handle('whisper:status', () => whisper.status());
   handleSafe('whisper:install', () => whisper.install((p) => send('whisper:progress', p)));
   // Ditado: só transcreve o áudio e devolve o texto para o campo do chat. Nada é enviado nem executado.

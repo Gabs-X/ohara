@@ -20,7 +20,7 @@ stub('core/local-chat', {
     if (opts.signal) opts.signal.addEventListener('abort', () => call.finish?.());
     await new Promise((resolve) => { call.finish = resolve; });
     if (opts.signal?.aborted) throw new Error('abortado');
-    return { provider: 'ollama', model: 'qwen-teste', text: call.answer ?? `resposta: ${opts.text}`, consult: call.consult, tokens: {} };
+    return { provider: 'ollama', model: 'qwen-teste', text: call.answer ?? `resposta: ${opts.text}`, consult: call.consult, pending: call.pending, tokens: {} };
   },
   // Briefing da tarefa do Orca: por padrão null (pedido como veio); o teste troca.
   briefLocal: async (opts) => {
@@ -572,4 +572,106 @@ test('cumprimento ("oi ohara, tudo bem?") vai direto para a Ohara-AI, sem gastar
   assert.equal(decideCalls.length, 1);
   localCalls[1].finish();
   await p2;
+});
+
+// ---- Ações da Ohara-AI no PC: o arriscado espera o "Confirmar" ----
+
+// PowerShell e programas falsos para as ações (nada toca o PC de verdade).
+function actionSetup() {
+  const ran = [];
+  const actionCtx = {
+    ps: async (script) => {
+      ran.push(script);
+      return { encontrados: 1, ainda_abertos: 0 };
+    },
+    exec: async (file, args) => ran.push([file, ...args].join(' ')),
+    open: async () => {},
+    schedule: (t, ms) => Date.now() + ms,
+  };
+  return { ...setup({ actionCtx }), ran };
+}
+const FECHAR = { name: 'fechar_programa', args: { nome: 'chrome' }, resumo: 'Fechar chrome' };
+
+async function askAction(o, chatId, text = 'fecha o chrome', runId = 'pa1') {
+  const p = o.send(chatId, { text, runId });
+  await tick();
+  const call = localCalls.at(-1);
+  call.answer = 'Vou fechar o Chrome. Confirma?';
+  call.pending = [FECHAR];
+  call.finish();
+  return p;
+}
+
+test('pedido de ação no PC fica com a Ohara-AI (sem Orca nem decisão) e o arriscado vira pendente', async () => {
+  const { o, ran } = actionSetup();
+  const chat = o.create(WORK);
+  const msg = await askAction(o, chat.id);
+  assert.equal(orcaCalls.length, 0);
+  assert.equal(decideCalls.length, 0);
+  assert.ok(localCalls[0].opts.actionCtx, 'o chat local recebeu o contexto das ações');
+  assert.equal(msg.provider, 'ollama');
+  assert.ok(msg.route.reasons.some((r) => /ação no PC/.test(r)));
+  assert.equal(msg.pcActions.length, 1);
+  assert.equal(msg.pcActions[0].status, 'pending');
+  assert.equal(ran.length, 0, 'nada rodou antes de confirmar');
+});
+
+test('sem pedir confirmação no texto, a Ohara acrescenta o pedido de confirmação', async () => {
+  const { o } = actionSetup();
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'fecha o chrome', runId: 'pa2' });
+  await tick();
+  localCalls[0].answer = 'Ok!';
+  localCalls[0].pending = [FECHAR];
+  localCalls[0].finish();
+  const msg = await p;
+  assert.match(msg.text, /Para fazer: \*\*Fechar chrome\*\*\. Confirme no botão ou responda "confirma"\./);
+});
+
+test('"confirma" executa a ação guardada, sem passar pela IA', async () => {
+  const { o, ran } = actionSetup();
+  const chat = o.create(WORK);
+  const asked = await askAction(o, chat.id);
+  const r = await o.send(chat.id, { text: 'confirma', runId: 'pa3' });
+  assert.equal(localCalls.length, 1, 'a confirmação não chamou o modelo');
+  assert.equal(r.provider, 'local');
+  assert.match(r.text, /Pronto: fechei chrome/);
+  assert.equal(asked.pcActions[0].status, 'done');
+  assert.ok(ran.some((s) => /Get-Process/.test(s)));
+});
+
+test('"não, cancela" descarta e não roda nada', async () => {
+  const { o, ran } = actionSetup();
+  const chat = o.create(WORK);
+  const asked = await askAction(o, chat.id);
+  const r = await o.send(chat.id, { text: 'não, cancela', runId: 'pa4' });
+  assert.match(r.text, /não vou fechar chrome/);
+  assert.equal(asked.pcActions[0].status, 'cancelled');
+  assert.equal(ran.length, 0);
+});
+
+test('botão Confirmar: roda o que está guardado; pedido vencido (10 min) não roda', async () => {
+  const { o, ran } = actionSetup();
+  const chat = o.create(WORK);
+  const asked = await askAction(o, chat.id);
+  const done = await o.confirmPcAction(chat.id, asked.id, 0);
+  assert.equal(done.status, 'done');
+  await assert.rejects(() => o.confirmPcAction(chat.id, asked.id, 5), /não encontrada/);
+  const again = await askAction(o, chat.id, 'fecha o chrome de novo', 'pa6');
+  again.pcActions[0].at = Date.now() - 11 * 60_000;
+  const before = ran.length;
+  await assert.rejects(() => o.confirmPcAction(chat.id, again.id, 0), /expirou/);
+  assert.equal(again.pcActions[0].status, 'expired');
+  assert.equal(ran.length, before);
+});
+
+test('mensagem comum com uma ação pendente segue para a IA normalmente', async () => {
+  const { o } = actionSetup();
+  const chat = o.create(WORK);
+  await askAction(o, chat.id);
+  const p = o.send(chat.id, { text: 'antes disso, qual a capital da França?', runId: 'pa7' });
+  await tick();
+  assert.equal(localCalls.length, 2);
+  localCalls[1].finish();
+  await p;
 });

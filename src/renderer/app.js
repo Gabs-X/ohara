@@ -172,6 +172,37 @@ function fillAssistant(wrap, m, { live = false } = {}) {
   }
 
   if (!live) renderImprovementOffer(wrap, m);
+  if (!live) renderPcActions(wrap, m);
+}
+
+// Ações da Ohara-AI no PC que esperam confirmação (fechar programa, apagar, desligar...).
+// O botão só diz qual item confirmar: o que roda é o que ficou guardado na mensagem.
+const PC_ACTION_LABEL = { pending: '', running: 'fazendo…', done: '✓ feito', error: '⚠️ falhou', cancelled: 'cancelada', expired: 'expirou' };
+function renderPcActions(wrap, m) {
+  wrap.querySelector('.pc-actions')?.remove();
+  if (!m.pcActions?.length) return;
+  const box = document.createElement('div');
+  box.className = 'pc-actions';
+  box.innerHTML = m.pcActions
+    .map((a, i) => {
+      const pending = a.status === 'pending';
+      const detail = a.status === 'done' ? a.result : a.status === 'error' ? a.error : '';
+      return `<div class="pc-action ${escapeHtml(a.status)}" data-i="${i}">
+        <span class="what">⚙️ ${escapeHtml(a.resumo)}</span>
+        ${pending ? '<button class="btn small-btn primary" data-a="ok">Confirmar</button><button class="btn small-btn" data-a="no">Cancelar</button>' : `<span class="state">${escapeHtml(PC_ACTION_LABEL[a.status] || a.status)}${detail ? ` · ${escapeHtml(detail)}` : ''}</span>`}
+      </div>`;
+    })
+    .join('');
+  box.querySelectorAll('.pc-action').forEach((row) => {
+    const i = Number(row.dataset.i);
+    row.querySelector('[data-a=ok]')?.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      const r = await central.pcActionConfirm(state.chatId, m.id, i);
+      if (!r?.ok) row.querySelector('.what').insertAdjacentHTML('afterend', `<span class="state">⚠️ ${escapeHtml(r?.error || 'falhou')}</span>`);
+    });
+    row.querySelector('[data-a=no]')?.addEventListener('click', () => central.pcActionCancel(state.chatId, m.id, i));
+  });
+  wrap.appendChild(box);
 }
 
 // Ela se ofereceu para se alterar: um clique aceita (o mesmo que responder "sim").
