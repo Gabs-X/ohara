@@ -65,9 +65,32 @@ function buildClaudeArgs(o) {
   return args;
 }
 
+// Ferramentas do Claude quando a Ohara-AI o chama no próprio chat: só internet, nada de arquivos ou comandos.
+const CHAT_TOOLS = 'WebSearch,WebFetch';
+
+/**
+ * Argumentos do Claude respondendo dentro do chat da Ohara (assunto que não é projeto): sem sessão salva,
+ * sem skills, sem Chrome e sem pasta de projeto; só pesquisa e leitura de páginas na internet.
+ */
+function buildChatArgs({ model, effort, systemPrompt }) {
+  return [
+    '-p',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--model', model,
+    '--effort', effort,
+    '--tools', CHAT_TOOLS,
+    '--allowedTools', CHAT_TOOLS,
+    '--no-session-persistence',
+    '--disable-slash-commands',
+    '--append-system-prompt', systemPrompt,
+  ];
+}
+
 async function runClaude(o) {
   const { config } = o;
-  const args = buildClaudeArgs(o);
+  const args = o.args || buildClaudeArgs(o);
 
   let prompt = o.prompt;
   if (o.images?.length) {
@@ -164,4 +187,4 @@ async function runClaude(o) {
   };
 }
 
-module.exports = { runClaude, buildClaudeArgs, claudeEnv, claudeConfigDir, friendlyError };
+module.exports = { runClaude, buildClaudeArgs, buildChatArgs, CHAT_TOOLS,claudeEnv, claudeConfigDir, friendlyError };

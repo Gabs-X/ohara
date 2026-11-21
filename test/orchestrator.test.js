@@ -47,6 +47,18 @@ stub('integrations/orca', {
   },
 });
 
+// Claude no chat falso: devolve claudeAnswer (ou lança claudeFail).
+const claudeCalls = [];
+let claudeFail = null;
+let claudeAnswer = 'resposta do Claude';
+const realClaude = require('../src/core/providers/claude');
+realClaude.runClaude = async (opts) => {
+  claudeCalls.push(opts);
+  if (claudeFail) return { provider: 'claude', model: 'sonnet', text: '', error: claudeFail, tokens: {} };
+  opts.onEvent({ kind: 'delta', text: claudeAnswer });
+  return { provider: 'claude', model: 'claude-sonnet', text: claudeAnswer, error: null, tokens: { input: 10, output: 5 } };
+};
+
 const { Orchestrator } = require('../src/core/orchestrator');
 const { DEFAULT_CONFIG } = require('../src/core/config');
 
@@ -56,9 +68,14 @@ function setup(extra = {}) {
   orcaFail = null;
   decideCalls.length = 0;
   verdict = { acao: 'conversar', tarefa: '' };
+  claudeCalls.length = 0;
+  claudeFail = null;
+  claudeAnswer = 'resposta do Claude';
   const events = [];
   const store = (data) => ({ data, save() {} });
-  const usage = { updateClaudeLimits() {}, summary: () => ({}), record() {}, refreshCodexLimits() {}, limits: () => ({}), current: () => ({}) };
+  const { limits = {}, ...rest } = extra;
+  extra = rest;
+  const usage = { recorded: [], updateClaudeLimits() {}, summary: () => ({}), record(...a) { this.recorded.push(a); }, refreshCodexLimits() {}, limits: () => limits, current: () => ({}) };
   const o = new Orchestrator({
     chatsStore: store({ chats: [] }),
     prefsStore: store({ overrides: [] }),
@@ -67,7 +84,7 @@ function setup(extra = {}) {
     emit: (ch, p) => events.push([ch, p]),
     ...extra,
   });
-  return { o, events };
+  return { o, events, usage };
 }
 // Pedido que vai para o Claude: a Ohara pergunta a conta primeiro; aqui já respondemos "pessoal".
 async function sendOrca(o, chatId, text, runId, account = 'pessoal') {
@@ -390,4 +407,52 @@ test('usar um site no navegador continua indo para o Claude', async () => {
   const q = await o.send(chat.id, { text: 'abre o linkedin no chrome e procura vagas', runId: 'pc2' });
   assert.match(q.text, /ImLaw/);
   assert.equal(localCalls.length, 0);
+});
+
+test('Ohara-AI chama o Claude no chat quando o modelo local não basta (sem projeto, sem Orca)', async () => {
+  const { o, usage } = setup();
+  const chat = o.create(WORK);
+  verdict = { acao: 'claude_chat', tarefa: '', motivo: 'precisa da cotação de hoje' };
+  const msg = await o.send(chat.id, { text: 'quanto está o dólar hoje?', runId: 'cc1' });
+  assert.equal(msg.provider, 'claude');
+  assert.equal(msg.text, 'resposta do Claude');
+  assert.equal(localCalls.length, 0);
+  assert.equal(orcaCalls.length, 0);
+  assert.equal(claudeCalls.length, 1);
+  const args = claudeCalls[0].args;
+  assert.equal(args[args.indexOf('--tools') + 1], 'WebSearch,WebFetch', 'só internet, sem arquivos nem comandos');
+  assert.ok(args.includes('--no-session-persistence'));
+  assert.ok(!args.includes('--add-dir') && !args.includes('--chrome'));
+  assert.equal(claudeCalls[0].cwd, os.tmpdir());
+  assert.match(claudeCalls[0].prompt, /quanto está o dólar hoje\?$/);
+  assert.ok(msg.route.reasons.some((r) => /chamou o Claude no chat: precisa da cotação/.test(r)));
+  assert.equal(usage.recorded.length, 1, 'gasto do Claude entra no uso');
+});
+
+test('Claude no chat: com a cota alta, fica no modelo local', async () => {
+  const { o } = setup({ limits: { claude: { fiveHour: 0.95, weekly: 0.2 } } });
+  const chat = o.create(WORK);
+  verdict = { acao: 'claude_chat', tarefa: '', motivo: 'conta difícil' };
+  const p = o.send(chat.id, { text: 'calcula os juros compostos disso', runId: 'cc2' });
+  await tick();
+  assert.equal(claudeCalls.length, 0);
+  localCalls[0].finish();
+  const msg = await p;
+  assert.equal(msg.provider, 'ollama');
+  assert.ok(msg.route.reasons.some((r) => /cota do Claude está em 95%/.test(r)));
+});
+
+test('Claude no chat: se o Claude falhar, a Ohara-AI responde', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  verdict = { acao: 'claude_chat', tarefa: '', motivo: 'texto formal' };
+  claudeFail = 'Claude AI usage limit reached';
+  const p = o.send(chat.id, { text: 'escreve uma notificação extrajudicial', runId: 'cc3' });
+  await tick();
+  assert.equal(claudeCalls.length, 1);
+  assert.equal(localCalls.length, 1);
+  localCalls[0].finish();
+  const msg = await p;
+  assert.equal(msg.provider, 'ollama');
+  assert.ok(!msg.error);
 });

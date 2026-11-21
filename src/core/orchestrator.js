@@ -3,7 +3,10 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const { route, classify, findProject, learnPreferences, normalize } = require('./router');
+const os = require('os');
 const { chatLocal, decideLocal } = require('./local-chat');
+const { runClaude, buildChatArgs } = require('./providers/claude');
+const { anonymize, deanonymize } = require('./local-tools');
 const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
@@ -46,6 +49,18 @@ const IGNORE_RE = /\[\[ignorar\]\]/i;
 
 // Na conversa por voz, o que não exige raciocínio vai para o modelo rápido (resposta em menos tempo).
 const VOICE_FAST = new Set(['rapida', 'geral', 'escrita', 'sistema']);
+
+// O Claude chamado pela Ohara-AI dentro do chat: responde aqui, só com acesso à internet.
+const CLAUDE_CHAT_NOTE = [
+  'Você é a Ohara, assistente pessoal do Gabriel. A Ohara-AI (o modelo local dela) chamou você para responder este pedido aqui no chat porque ele precisa de mais do que o modelo local dá conta.',
+  'Responda sempre em português do Brasil, de forma direta e assertiva, com bom humor leve quando couber (no máximo uma brincadeira, nunca quando ele estiver com problema sério). Não faça referências a One Piece nem a animes.',
+  'Você só tem pesquisa e leitura de páginas na internet: use quando precisar de informação atual e cite de onde veio. Não tem acesso a arquivos, comandos nem ao PC dele.',
+  'Se o pedido for sobre um projeto, código ou arquivos, não tente fazer: diga em uma frase que isso fica com o Claude no Orca e que basta ele pedir "manda pro Claude".',
+  'Se não souber ou não tiver certeza, diga isso em vez de inventar.',
+].join('\n');
+
+// Uso do Claude (0 a 1) na janela mais cheia.
+const claudeUtil = (l) => (l ? Math.max(l.fiveHour ?? 0, l.weekly ?? 0) : 0);
 
 const PARALLEL_NOTE =
   'Outra tarefa desta mesma conversa ainda está rodando em paralelo. Faça só o que este pedido pede e evite mexer nos mesmos arquivos que a outra tarefa sem necessidade.';
@@ -343,6 +358,16 @@ class Orchestrator {
         handoff = { task: verdict?.tarefa || '' };
         Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
         decision.reasons = [...(decision.reasons || []), explicit ? 'pediu para mandar ao Claude' : 'a Ohara-AI leu a conversa: é tarefa para o Claude'];
+      } else if (verdict?.acao === 'claude_chat') {
+        // Não é projeto, mas o modelo local não dá conta: o Claude responde aqui mesmo, se houver cota.
+        const why = this.#claudeChatBlocked(config);
+        const motivo = verdict.motivo || 'o modelo local não basta';
+        if (!why) {
+          Object.assign(decision, { provider: 'claude', model: config.claude.models.equilibrado, tier: 'equilibrado', effort: 'medium' });
+          decision.reasons = [...(decision.reasons || []), `a Ohara-AI chamou o Claude no chat: ${motivo}`];
+        } else {
+          decision.reasons = [...(decision.reasons || []), `pedia o Claude (${motivo}), mas ${why}: ficou no modelo local`];
+        }
       }
     }
     if (source === 'voice' && decision.provider === 'claude' && VOICE_FAST.has(decision.category) && (!override || override === 'auto')) {
@@ -416,6 +441,25 @@ class Orchestrator {
         // O nome do console e da branch saem da tarefa, não de "pode seguir".
         const label = answered ? answered.pending.text : handoff?.task || text;
         result = await this.#toOrca({ chat, config, text: label, request, cwd, userIndex, onEvent, assistant, account, withContext: !!handoff });
+      } else if (decision.provider === 'claude') {
+        try {
+          result = await this.#claudeInChat({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source });
+        } catch (err) {
+          if (ac.signal.aborted) throw err;
+          // Claude fora (cota, login, privacidade sem o modelo local...): a Ohara-AI responde, sem deixar o pedido sem resposta.
+          decision.reasons = [...(decision.reasons || []), `o Claude não respondeu (${clip(err.message, 160)}): a Ohara-AI respondeu`];
+          onEvent({ kind: 'tool', text: 'Claude indisponível: respondendo no modelo local' });
+          Object.assign(decision, { provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined });
+          result = await chatLocal({
+            config,
+            history: chat.messages.slice(0, userIndex),
+            text,
+            project: cwd ? path.basename(cwd) : null,
+            signal: ac.signal,
+            onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+            onStep: (t) => onEvent({ kind: 'tool', text: t }),
+          });
+        }
       } else {
         result = await chatLocal({
           config,
@@ -436,6 +480,7 @@ class Orchestrator {
     assistant.text = result.text || '';
     assistant.error = result.error || null;
     assistant.model = result.model || decision.model;
+    assistant.provider = result.provider || assistant.provider; // o Claude no chat pode ter caído para a Ohara-AI
     assistant.tokens = result.tokens;
     // Rascunho para contato vale mesmo quando o pedido não citou o WhatsApp ("envie a mensagem").
     const hasDraft = !!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text);
@@ -470,6 +515,69 @@ class Orchestrator {
     }
     this.emit('chat:done', { chatId, runId, message: assistant, source, running: this.isRunning(chatId) });
     return assistant;
+  }
+
+  // Por que a Ohara-AI não pode chamar o Claude no chat agora (null = pode).
+  #claudeChatBlocked(config) {
+    if (config.ollama?.claudeChat === false) return 'isso está desligado nos Ajustes';
+    let limits = null;
+    try {
+      limits = this.usage.limits()?.claude || null;
+    } catch {}
+    if (limits?.status === 'rejected') return 'a cota do Claude acabou';
+    const max = config.quota?.claudeAvoidAt ?? 0.9;
+    if (claudeUtil(limits) >= max) return `a cota do Claude está em ${Math.round(claudeUtil(limits) * 100)}%`;
+    return null;
+  }
+
+  // O Claude responde no próprio chat: recebe a conversa como contexto, só tem internet e não salva sessão.
+  async #claudeInChat({ chat, config, text, userIndex, decision, signal, onEvent, source }) {
+    let prompt = `${this.#handoff(chat, 'claude', { upTo: userIndex, fresh: true })}${text}`;
+    // Privacidade ligada: CPF, nomes etc. viram marcadores antes de sair do PC. A resposta só aparece
+    // no fim, já com os nomes de volta (em pedaços ela mostraria os marcadores).
+    const priv = config.privacy || {};
+    let map = null;
+    if (priv.anonymizeCloud) {
+      const keep = [...(priv.keep || []), config.meetings?.selfName].filter(Boolean);
+      let a;
+      try {
+        a = await anonymize({ config, text: prompt, names: priv.names !== false, keep, signal, strict: true });
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        throw new Error(`a privacidade está ligada, mas ${e.message}; nada foi enviado para a nuvem`);
+      }
+      prompt = a.text;
+      map = Object.keys(a.map || {}).length ? a.map : null;
+    }
+    const systemPrompt = [CLAUDE_CHAT_NOTE, source === 'voice' ? VOICE_NOTE : ''].filter(Boolean).join('\n\n');
+    onEvent({ kind: 'tool', text: `Ohara-AI chamou o Claude (${decision.model})` });
+    const r = await runClaude({
+      config,
+      args: buildChatArgs({ model: decision.model, effort: decision.effort || 'medium', systemPrompt }),
+      cwd: os.tmpdir(),
+      prompt,
+      signal,
+      onEvent: (ev) => {
+        if (ev.kind === 'limits') {
+          try {
+            this.usage.updateClaudeLimits(ev.info);
+          } catch {}
+          return;
+        }
+        if (map && ev.kind === 'delta') return;
+        onEvent(ev);
+      },
+    });
+    if (r.error) throw new Error(r.error);
+    if (!r.text) throw new Error('resposta vazia');
+    try {
+      this.usage.record('claude', r.model, r.tokens, 'chat');
+    } catch {}
+    if (map) {
+      r.text = deanonymize(r.text, map);
+      onEvent({ kind: 'delta', text: r.text });
+    }
+    return r;
   }
 
   // Abre o Orca no projeto, na branch da tarefa, com o Claude já recebendo o pedido e o contexto.

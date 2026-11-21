@@ -55,6 +55,9 @@ const DEFAULT_CONFIG = {
     embedModel: 'bge-m3', // busca por significado nos documentos (ollama pull bge-m3)
     visionModel: 'qwen2.5vl:7b', // leitura de documento por foto (ollama pull qwen2.5vl:7b)
     tools: true, // Ohara-AI consulta o PC sozinha (disco, memória, processos, navegadores, programas, rede, pastas); só leitura
+    // A Ohara-AI chama o Claude no próprio chat quando o modelo local não basta e o assunto não é projeto
+    // (informação atual da internet, raciocínio difícil, texto formal longo). Gasta cota; projeto continua indo ao Orca.
+    claudeChat: true,
   },
 
   // Ferramentas locais → Documentos: pastas indexadas para a busca por significado (nada sai do PC).

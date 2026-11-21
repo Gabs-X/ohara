@@ -201,16 +201,22 @@ const DECIDE_PROMPT = [
   'Você é o roteador da Ohara-AI, a assistente local do Gabriel. Leia a conversa e a última mensagem dele e decida quem atende.',
   '"conversar": a Ohara-AI responde sozinha. Serve para conversa, dúvidas, explicações, opiniões, textos, resumos e planos que não exigem mexer em nada.',
   'Também é "conversar" CONSULTAR o PC: a Ohara-AI tem ferramentas de leitura para armazenamento/espaço em disco, CPU, memória RAM, bateria, processos abertos, navegadores instalados e abertos, programas instalados, rede/Wi-Fi e tamanho e conteúdo de pastas. Ex.: "quanto tenho de armazenamento?", "o que está pesando no PC?", "quais navegadores eu tenho?", "o que ocupa a pasta Downloads?".',
-  '"claude": precisa do Claude no Orca, que tem ferramentas de escrita. Serve para alterar código ou arquivos, apagar/instalar/fechar coisas, rodar comandos ou rotinas, pesquisar na web, usar sites no navegador (LinkedIn, Gmail...) ou ler o conteúdo de arquivos de projetos.',
+  '"claude": precisa do Claude no Orca, que tem ferramentas de escrita. Serve para alterar código ou arquivos, apagar/instalar/fechar coisas, rodar comandos ou rotinas, pesquisas longas na web para uma tarefa, usar sites no navegador (LinkedIn, Gmail...) ou ler o conteúdo de arquivos de projetos.',
   'Também é "claude" quando ele confirma ou manda seguir uma tarefa dessas já combinada na conversa ("pode seguir", "faz", "sim", "manda bala"), pede para encaminhar ao Claude ou ao Orca, ou reclama que isso não foi feito.',
   'Quando ele claramente quer que algo seja FEITO, e não só explicado, escolha "claude".',
-  'Responda só com JSON: {"acao":"conversar" ou "claude","tarefa":"se for claude: a tarefa completa e autossuficiente em 1 a 3 frases, com projeto, arquivos citados e o resultado que ele quer; senão vazio"}',
+  '"claude_chat": o Claude responde aqui mesmo no chat, sem abrir projeto. Gasta cota, então só use quando for NECESSÁRIO e o assunto NÃO for projeto, código ou arquivos (isso é sempre "claude"). Casos:',
+  '- precisa de informação atual ou da internet que o modelo local não tem (notícia, cotação, preço, lei ou versão recente, resultado de jogo, previsão do tempo);',
+  '- raciocínio difícil em que errar custa caro: análise jurídica, contas e finanças com vários passos, comparação técnica detalhada, texto longo e formal (contrato, petição, e-mail delicado);',
+  '- a Ohara-AI já errou ou não soube responder nesta conversa e ele reclamou, ou ele pediu uma resposta mais caprichada ou a opinião do Claude sem ser sobre projeto.',
+  'Conversa comum, dúvidas simples, explicações gerais, textos curtos, resumos e consultas do PC são "conversar", mesmo que o Claude fosse fazer melhor. Na dúvida entre "conversar" e "claude_chat", escolha "conversar".',
+  'Responda só com JSON: {"acao":"conversar", "claude" ou "claude_chat","tarefa":"se for claude: a tarefa completa e autossuficiente em 1 a 3 frases, com projeto, arquivos citados e o resultado que ele quer; senão vazio","motivo":"se for claude_chat: em poucas palavras, por que o modelo local não basta; senão vazio"}',
 ].join('\n');
 
 /**
  * Decide, lendo a conversa, se a mensagem fica na Ohara-AI ou vai para o Claude no Orca.
  * Nunca lança (exceto cancelamento): em erro devolve null e quem chamou segue com a regra fixa.
- * @returns {Promise<{acao:'conversar'|'claude', tarefa:string}|null>}
+ * "claude_chat": o Claude responde no próprio chat (assunto que não é projeto, mas que o modelo local não dá conta).
+ * @returns {Promise<{acao:'conversar'|'claude'|'claude_chat', tarefa:string, motivo:string}|null>}
  */
 async function decideLocal({ config, history, text, signal }) {
   try {
@@ -226,7 +232,8 @@ async function decideLocal({ config, history, text, signal }) {
       ],
     });
     const j = JSON.parse(r.text);
-    return { acao: j.acao === 'claude' ? 'claude' : 'conversar', tarefa: String(j.tarefa || '').trim() };
+    const acao = j.acao === 'claude' || j.acao === 'claude_chat' ? j.acao : 'conversar';
+    return { acao, tarefa: String(j.tarefa || '').trim(), motivo: String(j.motivo || '').trim() };
   } catch (e) {
     if (signal?.aborted) throw e;
     return null;
