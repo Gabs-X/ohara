@@ -1130,6 +1130,10 @@ app.whenReady().then(() => {
 
   // Deixa o modelo local carregado: a primeira pergunta não espera ~20 s de carregamento.
   setTimeout(() => require('./core/local-chat').warmLocal(config).catch(() => {}), 3000);
+  // Quadro do Orca em dia: Em andamento → Em revisão → Concluído pelo estado do Git (orca.autoStatus: false desliga).
+  const syncOrca = () => { if (config.orca?.autoStatus !== false) require('./integrations/orca').syncOrcaStatus(config).catch(() => {}); };
+  setTimeout(syncOrca, 60_000);
+  setInterval(syncOrca, 10 * 60_000);
   guarded('reuniões', () => meetings.start())();
   guarded('automações', () => automations.start())();
   // Classifica "aguardando outros" antigos (uma chamada rápida, só quando houver itens sem marca).

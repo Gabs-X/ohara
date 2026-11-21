@@ -79,6 +79,7 @@ const DEFAULT_CONFIG = {
   orca: {
     bin: '', // vazio = %LOCALAPPDATA%\Programs\orca
     agent: 'claude',
+    autoStatus: true, // status no quadro do Orca (Em andamento / Em revisão / Concluído) pelo estado do Git, a cada 10 min
     generalDir: 'C:/Users/gabri/Claude', // onde o Claude abre quando o pedido não cita um projeto
     // Antes de abrir o Claude no Orca, a Ohara pergunta qual conta usar. "account" é o que o Orca aceita em
     // `orca account select` (e-mail ou id; "system" = login padrão, ~/.claude). Vazio: imlaw = system;

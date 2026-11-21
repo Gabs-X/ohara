@@ -705,7 +705,7 @@ class Orchestrator {
     // Aspas duplas viram "^" no caminho até o Orca: troca por aspas tipográficas.
     const prompt = parts.filter(Boolean).join('\n').replace(/"/g, '”');
     onEvent({ kind: 'tool', text: 'Orca: abrindo o projeto e o Claude' });
-    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account, branch: brief?.branch || null, title: brief?.titulo || null });
+    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account, branch: brief?.branch || null, title: brief?.titulo || null, objective: brief?.objetivo || null });
     (chat.orca ||= {})[key] = r.state;
     if (dir !== general) chat.lastProject = dir;
     this.#rememberAccount(chat, key, r.state?.account || account);

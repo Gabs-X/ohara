@@ -131,8 +131,6 @@ async function findRepo(bin, root) {
   return repos.find((r) => norm(r.path) === norm(root)) || null;
 }
 
-const ACCOUNT_TAG = { imlaw: 'ImLaw', pessoal: 'Pessoal' };
-
 // Texto curto do pedido para servir de nome ("corrige o bug do login" → "Corrige bug login").
 function taskTitle(request, max = 5) {
   const words = String(request || '').replace(/\s+/g, ' ').trim().split(' ').filter((w) => w.length > 1 && !STOP.has(w.toLowerCase()));
@@ -140,19 +138,109 @@ function taskTitle(request, max = 5) {
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
 
-// Deixa fácil de achar no Orca qual console é de qual projeto/tarefa/conta: dá nome à aba do terminal
-// ("[ImLaw] projeto · Tarefa") e ao workspace (nome + comentário). Só enfeite: se falhar, não atrapalha.
-async function labelConsole(bin, { terminal, worktree, root, request, account }) {
-  const tag = ACCOUNT_TAG[account] || null;
-  const project = path.basename(root || '') || 'projeto';
-  const task = taskTitle(request);
-  const title = `${tag ? `[${tag}] ` : ''}${project} · ${task}`;
-  if (terminal) await orcaJson(bin, ['terminal', 'rename', '--terminal', terminal, '--title', title]).catch(() => {});
-  if (worktree) {
-    const comment = `Ohara · ${tag ? `Conta: ${tag} · ` : ''}Pedido: ${String(request || '').replace(/\s+/g, ' ').trim().slice(0, 200)}`;
-    await orcaJson(bin, ['worktree', 'set', '--worktree', `id:${worktree}`, '--display-name', `${tag ? `[${tag}] ` : ''}${task}`, '--comment', comment]).catch(() => {});
+// ---------- Status no quadro do Orca pelo estado do Git ----------
+// Em andamento → Em revisão (há commit próprio pronto, nada pendente) → Concluído (o trabalho já entrou na
+// branch principal). Worktree recém-criada também "está na principal" (é a mesma ponta): só conta como
+// concluída se teve commit próprio (reflog), senão ficaria Concluída no minuto em que nasce.
+const BASES = ['main', 'master', 'dev', 'origin/main', 'origin/master', 'origin/dev'];
+
+function statusFor({ dirty = 0, merged = false, hadWork = false, ahead = 0 }) {
+  if (dirty > 0) return 'in-progress';
+  if (merged && hadWork) return 'completed';
+  if (ahead > 0) return 'in-review';
+  return 'in-progress';
+}
+
+function gitRun(cwd, args) {
+  return new Promise((resolve) => {
+    execFile('git', ['-C', cwd, ...args], { windowsHide: true, timeout: 20_000 }, (err, out) => resolve(err ? null : String(out).trim()));
+  });
+}
+
+async function worktreeGitState(repoPath, wtPath, branch) {
+  const head = await gitRun(wtPath, ['rev-parse', 'HEAD']);
+  if (!head) return null;
+  const dirty = ((await gitRun(wtPath, ['status', '--porcelain'])) || '').split('\n').filter(Boolean).length;
+  const bases = [];
+  for (const b of BASES) if (await gitRun(repoPath, ['rev-parse', '--verify', '--quiet', b])) bases.push(b);
+  if (!bases.length) return null;
+  let merged = false;
+  let ahead = Infinity;
+  for (const b of bases) {
+    if ((await gitRun(repoPath, ['merge-base', '--is-ancestor', head, b])) !== null) merged = true;
+    const n = Number(await gitRun(wtPath, ['rev-list', '--count', `${b}..HEAD`]));
+    if (Number.isFinite(n)) ahead = Math.min(ahead, n);
   }
-  return title;
+  const ref = branch ? `refs/heads/${String(branch).replace(/^refs\/heads\//, '')}` : 'HEAD';
+  const log = (await gitRun(wtPath, ['reflog', 'show', '--format=%gs', ref])) || '';
+  const hadWork = log.split('\n').some((l) => /^(commit|merge|rebase|cherry-pick|pull)/.test(l));
+  return { dirty, merged, hadWork, ahead: Number.isFinite(ahead) ? ahead : 0 };
+}
+
+/**
+ * Atualiza o status de cada workspace no quadro do Orca (não mexe no principal de cada projeto).
+ * Só troca quando muda. Sem o Orca aberto, não faz nada. Devolve o que mudou.
+ */
+async function syncOrcaStatus(config, { list = null, set = null, gitState = worktreeGitState } = {}) {
+  const bin = orcaBin(config);
+  const call = (args) => orcaJson(bin, args);
+  let repos;
+  let wts;
+  try {
+    repos = list ? (await list()).repos : (await call(['repo', 'list'])).repos || [];
+    wts = list ? (await list()).worktrees : (await call(['worktree', 'list'])).worktrees || [];
+  } catch {
+    return []; // Orca fechado
+  }
+  const changed = [];
+  for (const w of wts) {
+    if (w.isMainWorktree || w.isBare || w.isArchived) continue;
+    const repo = repos.find((r) => r.id === w.repoId);
+    if (!repo || repo.kind !== 'git') continue;
+    const st = await gitState(repo.path, w.path, w.branch);
+    if (!st) continue;
+    const status = statusFor(st);
+    if (status === w.workspaceStatus) continue;
+    try {
+      if (set) await set(w, status);
+      else await call(['worktree', 'set', '--worktree', `path:${w.path}`, '--workspace-status', status]);
+      changed.push({ name: w.displayName, from: w.workspaceStatus || null, to: status });
+    } catch {}
+  }
+  return changed;
+}
+
+// Ícone pelo tipo da branch do briefing ("fix/..." → 🐛). Sem tipo: 💬.
+const TYPE_ICON = { fix: '🐛', feat: '✨', chore: '🔧', docs: '📝', refactor: '♻️', perf: '⚡' };
+const ACCOUNT_LABEL = { imlaw: 'Escritório (ImLaw)', pessoal: 'Pessoal' };
+
+/**
+ * Como o trabalho aparece no Orca. O projeto já agrupa os workspaces, então o nome é só o assunto, com o ícone
+ * do tipo ("🐛 Roteamento da Ohara"); a conta do Claude, a data e o objetivo vão no comentário. A conta NÃO vai
+ * no nome: "[ImLaw]" num workspace do projeto ohara parecia ser o projeto.
+ */
+function orcaLabels({ request, title = null, branch = null, account = null, objective = null, now = new Date() }) {
+  const type = String(branch || '').split('/')[0];
+  const icon = TYPE_ICON[type] || '💬';
+  const name = `${icon} ${String(title || taskTitle(request)).replace(/\s+/g, ' ').trim().slice(0, 48)}`;
+  const acc = ACCOUNT_LABEL[account] || null;
+  const date = now.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  const goal = String(objective || request || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+  const comment = [acc ? `Conta: ${acc}` : '', `aberto pela Ohara em ${date}`, goal ? `Objetivo: ${goal}` : ''].filter(Boolean).join(' · ');
+  // A aba do terminal mostra a conta: vários terminais lado a lado, cada um com um Claude.
+  const terminalTitle = `${name}${acc ? ` · ${acc}` : ''}`;
+  return { name, comment, terminalTitle };
+}
+
+// Dá nome à aba do terminal e ao workspace (nome, comentário e status "Em andamento" no quadro do Orca).
+// Só arrumação: se falhar, não atrapalha.
+async function labelConsole(bin, { terminal, worktree, request, account, title = null, branch = null, objective = null }) {
+  const l = orcaLabels({ request, title, branch, account, objective });
+  if (terminal) await orcaJson(bin, ['terminal', 'rename', '--terminal', terminal, '--title', l.terminalTitle]).catch(() => {});
+  if (worktree) {
+    await orcaJson(bin, ['worktree', 'set', '--worktree', `id:${worktree}`, '--display-name', l.name, '--comment', l.comment, '--workspace-status', 'in-progress']).catch(() => {});
+  }
+  return l.terminalTitle;
 }
 
 // O Orca roda o agente com o prompt na linha de comando do shell do terminal: a primeira quebra de linha
@@ -192,9 +280,7 @@ function handleOf(result) {
  * @param {string} [o.account] conta do Claude escolhida ("imlaw" ou "pessoal"); vale para o console novo
  * @returns {Promise<{state:object, branch:string|null, worktree:string|null, reused:boolean, root:string, kind:'git'|'folder', startedOrca:boolean}>}
  */
-async function sendToOrca({ config, cwd, request, prompt, state = null, account = null, branch = null, title = null }) {
-  // Título do briefing (quando houver) dá nome ao console; senão, as primeiras palavras do pedido.
-  const label = title || request;
+async function sendToOrca({ config, cwd, request, prompt, state = null, account = null, branch = null, title = null, objective = null }) {
   const bin = orcaBin(config);
   const agent = config.orca?.agent || 'claude';
   const { started: startedOrca } = await ensureOrca(bin);
@@ -234,7 +320,7 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
       try {
         const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `id:${state.worktree}`, '--prompt', line, '--surface', 'terminal', '--focus']);
         const next = { ...state, account: acc, terminal: handleOf(res) };
-        await labelConsole(bin, { terminal: next.terminal, worktree: state.worktree, root, request: label, account: acc });
+        await labelConsole(bin, { terminal: next.terminal, worktree: state.worktree, request, title, branch: state.branch, account: acc, objective });
         return { state: next, branch: state.branch, worktree: state.worktree, reused: true, root, kind, startedOrca };
       } catch {
         // worktree apagada: cria outra
@@ -246,15 +332,15 @@ async function sendToOrca({ config, cwd, request, prompt, state = null, account 
     const res = await orcaJson(bin, ['worktree', 'create', '--repo', `id:${repo.id}`, '--name', name, '--branch', ref, '--agent', agent, '--prompt', line, '--surface', 'terminal', '--activate'], { timeout: 180_000 });
     const wt = res.worktree || res;
     const next = { repoId: repo.id, account: acc, worktree: wt.id || null, branch: String(wt.branch || ref).replace(/^refs\/heads\//, ''), terminal: handleOf(res) };
-    await labelConsole(bin, { terminal: next.terminal, worktree: next.worktree, root, request: label, account: acc });
+    await labelConsole(bin, { terminal: next.terminal, worktree: next.worktree, request, title, branch: next.branch, account: acc, objective });
     return { state: next, branch: next.branch, worktree: next.worktree, reused: false, root, kind, startedOrca };
   }
 
   // Pasta comum (sem git): abre o Claude na própria pasta.
   const res = await orcaJson(bin, ['agent', 'launch', '--agent', agent, '--worktree', `path:${root}`, '--prompt', line, '--surface', 'terminal', '--focus']);
   const next = { repoId: repo.id, account: acc, worktree: null, branch: null, terminal: handleOf(res) };
-  await labelConsole(bin, { terminal: next.terminal, root, request: label, account: acc });
+  await labelConsole(bin, { terminal: next.terminal, request, title, account: acc, objective });
   return { state: next, branch: null, worktree: null, reused: false, root, kind, startedOrca };
 }
 
-module.exports = { sendToOrca, validBranch, singleLinePrompt, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };
+module.exports = { statusFor, syncOrcaStatus, worktreeGitState, orcaLabels, sendToOrca, validBranch, singleLinePrompt, taskTitle, accountSelector, branchSlug, orcaBin, ensureOrca, norm };
