@@ -122,3 +122,12 @@ test('Codex desligado (o padrão): nada vai para ele, nem por categoria, cota, p
   assert.equal(manual.provider, 'claude');
   assert.equal(manual.model, off.claude.models.profundo);
 });
+
+test('"ohara" como chamamento não vira o projeto da Ohara; "na ohara" vira', () => {
+  const { findProject, normalize } = require('../src/core/router');
+  const projects = [{ name: 'ohara', path: 'C:/p/ohara', self: true }, { name: 'taverna-bot', path: 'C:/p/taverna-bot' }];
+  assert.equal(findProject(normalize('ohara vc como uma IA Ollama tem como eu te ensinar a fazer coisas ou adicionar ?'), projects), null);
+  assert.equal(findProject(normalize('corrige o bug na ohara'), projects)?.name, 'ohara');
+  assert.equal(findProject(normalize('melhora o codigo da ohara'), projects)?.name, 'ohara');
+  assert.equal(findProject(normalize('taverna bot corrige o login'), projects)?.name, 'taverna-bot');
+});

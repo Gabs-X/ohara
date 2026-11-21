@@ -92,6 +92,8 @@ function countHits(text, words) {
   return hits;
 }
 
+const SELF_CTX_RE = / (na|no|da|do|pra|pro|para|em|projeto|repo|repositorio|codigo|app|aplicativo)( d[ao])? $/;
+
 // Acha um projeto citado pelo nome ("taverna bot" → taverna-bot).
 function findProject(text, projects = []) {
   const flat = text.replace(/[-_]/g, ' ');
@@ -100,6 +102,12 @@ function findProject(text, projects = []) {
     const name = normalize(p.name).trim().replace(/[-_]/g, ' ');
     if (name.length < 4) continue;
     if (flat.includes(` ${name} `) || flat.includes(` ${name.replace(/ /g, '')} `)) {
+      // O repositório da própria Ohara: "ohara, tem como..." é chamamento, não o projeto.
+      // Só conta com contexto de projeto antes ("na ohara", "no código da ohara").
+      if (p.self) {
+        const i = flat.indexOf(` ${name} `);
+        if (i < 0 || !SELF_CTX_RE.test(flat.slice(0, i + 1))) continue;
+      }
       if (!found || name.length > found.len) found = { ...p, len: name.length };
     }
   }

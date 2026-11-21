@@ -68,6 +68,7 @@ const PARALLEL_NOTE =
 // Categorias que exigem ferramentas: só vão para o Claude (no Orca) quando o pedido é uma ação.
 const AGENT_CATEGORIES = new Set(['codigo', 'codigo_complexo', 'sistema', 'pesquisa']);
 const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[aei]\w*|abert\w*|encaminh\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
+const QUESTION_RE = /\b(tem como|da pra|da para|consegue|conseguiria|voce sabe|vc sabe|sabe fazer|sabe como|e possivel|seria possivel|como (eu )?(faco|posso)|como funciona)\b/;
 // Pedido explícito para o Claude/Orca ("encaminhe ao Claude", "abre o Orca", "era pra ter aberto o Orca"):
 // vai sem depender do modelo local acertar.
 const HANDOFF_TARGET_RE = /\b(claude|orca)\b/;
@@ -230,7 +231,8 @@ class Orchestrator {
     if (!this.projCache || this.projCache.root !== root || Date.now() - this.projCache.at > 5 * 60_000) {
       let list = [];
       try {
-        list = listRepos(root).map((p) => ({ name: path.basename(p), path: p }));
+        const self = this.getConfig().selfRepo ? path.resolve(this.getConfig().selfRepo).toLowerCase() : null;
+        list = listRepos(root).map((p) => ({ name: path.basename(p), path: p, self: path.resolve(p).toLowerCase() === self || path.basename(p).toLowerCase() === 'ohara' }));
       } catch {}
       this.projCache = { root, at: Date.now(), list };
     }
@@ -279,7 +281,9 @@ class Orchestrator {
     const continued = (base.reasons || []).some((r) => /continua o assunto/.test(r)) && !!chat?.messages.some((m) => m.route?.provider === 'orca');
     // Só consulta o PC (espaço, memória, navegadores instalados...): a Ohara-AI lê sozinha, sem o Claude.
     const pcInfo = config.ollama?.tools !== false && asksPcInfo(text);
-    const toAgent = !pcInfo && ((AGENT_CATEGORIES.has(base.category) && (ACTION_RE.test(normalize(text)) || continued)) || (config.claude?.chrome !== false && needsBrowser(text)));
+    // Pergunta ("tem como...?", "dá pra...?") não é ordem: quem decide é a Ohara-AI, não o verbo solto.
+    const question = QUESTION_RE.test(normalize(text));
+    const toAgent = !pcInfo && ((AGENT_CATEGORIES.has(base.category) && ((ACTION_RE.test(normalize(text)) && !question) || continued)) || (config.claude?.chrome !== false && needsBrowser(text)));
     const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : pcInfo ? 'consulta do PC: a Ohara-AI lê sozinha' : 'conversa: modelo local'];
     return toAgent
       ? { ...base, provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined, reasons }
