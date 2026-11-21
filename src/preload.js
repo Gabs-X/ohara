@@ -11,8 +11,13 @@ contextBridge.exposeInMainWorld('central', {
   // Configuração
   getConfig: inv('config:get'),
   setConfig: inv('config:set'),
+  checkDevelopment: inv('development:check'),
   hotkeyStatus: inv('hotkeys:status'),
   appVersion: inv('app:version'),
+  updateState: inv('update:state'),
+  updateCheck: inv('update:check'),
+  updateInstall: inv('update:install'),
+  onUpdateStatus: on('update:status'),
 
   // Conversas
   listChats: inv('chats:list'),
@@ -42,6 +47,9 @@ contextBridge.exposeInMainWorld('central', {
   voiceHeard: inv('voice:heard'),
   voiceEnd: inv('voice:end'),
   voiceLog: inv('voice:log'),
+  listeningStatus: inv('voice:status'),
+  reportListening: inv('voice:status-report'),
+  onListeningStatus: on('voice:status'),
   onVoiceSession: on('voice:session'),
   onConfigChanged: on('config:changed'),
   openPath: inv('shell:openPath'),
@@ -72,6 +80,19 @@ contextBridge.exposeInMainWorld('central', {
   saveMeetingMarkdown: inv('insights:saveMarkdown'),
   mailMeeting: inv('insights:mailto'),
 
+  // Ferramentas locais (modelo local)
+  toolsStatus: inv('tools:status'),
+  pickFile: inv('dialog:file'),
+  docsIndex: inv('docs:index'),
+  docsAsk: inv('docs:ask'),
+  onDocsProgress: on('docs:progress'),
+  toolExtract: inv('tools:extract'),
+  toolTriage: inv('tools:triage'),
+  toolPhoto: inv('tools:photo'),
+  toolAnonymize: inv('tools:anonymize'),
+  toolCommit: inv('tools:commit'),
+  toolLog: inv('tools:log'),
+
   // Automações
   getAutomations: inv('auto:get'),
   saveRoutine: inv('auto:saveRoutine'),
@@ -93,6 +114,8 @@ contextBridge.exposeInMainWorld('central', {
   whatsappWebConnect: inv('whatsapp:webConnect'),
   whatsappConfirm: inv('whatsapp:confirm'),
   whatsappCancel: inv('whatsapp:cancel'),
+  pcActionConfirm: inv('pcaction:confirm'),
+  pcActionCancel: inv('pcaction:cancel'),
   whisperStatus: inv('whisper:status'),
   whisperInstall: inv('whisper:install'),
   transcribe: inv('whisper:transcribe'),
@@ -104,6 +127,22 @@ contextBridge.exposeInMainWorld('central', {
   quickResize: inv('quick:resize'),
   quickPin: inv('quick:pin'),
   quickOpenInMain: inv('quick:openInMain'),
+
+  // Modo entrevista
+  interviewSnapshot: inv('interview:snapshot'),
+  interviewStart: inv('interview:start'),
+  interviewStop: inv('interview:stop'),
+  interviewAudio: inv('interview:audio'),
+  interviewTurnEnd: inv('interview:turnEnd'),
+  interviewAnswerNow: inv('interview:answerNow'),
+  interviewAsk: inv('interview:ask'),
+  interviewOpenContext: inv('interview:openContext'),
+  interviewOpenLog: inv('interview:openLog'),
+  interviewHide: inv('interview:hide'),
+  interviewNew: inv('interview:new'),
+  onInterviewStatus: on('interview:status'),
+  onInterviewCard: on('interview:card'),
+  onInterviewLine: on('interview:line'),
 
   // Eventos
   onRoute: on('chat:route'),

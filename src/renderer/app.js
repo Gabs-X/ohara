@@ -45,12 +45,13 @@ const el = {
   speak: $('#speak-replies'),
 };
 
-// encodeURI: nomes com espaço, # ou ? não quebram a URL da imagem.
-const fileUrl = (p) => `file:///${encodeURI(p.replace(/\\/g, '/').replace(/^\/+/, ''))}`;
+// Codifica cada pedaço do caminho: nomes com espaço, # ou ? não quebram a URL da imagem.
+const fileUrl = (p) => `file:///${String(p).replace(/\\/g, '/').replace(/^\/+/, '').split('/')
+  .map((seg, i) => (i === 0 && /^[a-z]:$/i.test(seg) ? seg : encodeURIComponent(seg))).join('/')}`;
 const fmtNum = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
 
 function providerTag(msg) {
-  const name = msg.provider === 'codex' ? 'Codex' : msg.provider === 'local' ? 'Ohara' : 'Claude';
+  const name = { codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[msg.provider] || 'Claude';
   return `<span class="tag ${msg.provider}">${name} · ${escapeHtml(msg.model || '')}</span>`;
 }
 
@@ -59,19 +60,96 @@ function escapeHtml(s) {
 }
 
 // ---------- Conversas ----------
+// Apagar pede um segundo clique: o botão vira "Apagar?" por 4 s (sem janela de diálogo, que trava o app).
+function armDelete(btn, onConfirm, label = 'Apagar?') {
+  if (btn.dataset.armed === '1') {
+    clearTimeout(Number(btn.dataset.timer));
+    onConfirm();
+    return;
+  }
+  const original = btn.innerHTML;
+  btn.dataset.armed = '1';
+  btn.classList.add('armed');
+  btn.textContent = label;
+  btn.dataset.timer = String(setTimeout(() => {
+    btn.dataset.armed = '';
+    btn.classList.remove('armed');
+    btn.innerHTML = original;
+  }, 4000));
+}
+
+async function deleteChats(ids) {
+  for (const id of ids) await central.deleteChat(id);
+  if (ids.includes(state.chatId)) {
+    state.chatId = null;
+    state.chat = null;
+    renderMessages();
+    el.title.textContent = 'Nova conversa';
+  }
+  updateDeleteButton();
+  refreshList();
+}
+
+// Modo "Selecionar": marca várias conversas e apaga de uma vez.
+state.selecting = false;
+state.selected = new Set();
+function setSelecting(on) {
+  state.selecting = on;
+  state.selected.clear();
+  $('#bulk-bar').hidden = !on;
+  $('#select-chats').hidden = on;
+  updateBulkBar();
+  refreshList();
+}
+function updateBulkBar() {
+  const n = state.selected.size;
+  $('#bulk-count').textContent = n === 1 ? '1 marcada' : `${n} marcadas`;
+  const del = $('#bulk-delete');
+  del.disabled = !n;
+  del.textContent = n ? `Apagar ${n}` : 'Apagar';
+  del.dataset.armed = '';
+  del.classList.remove('armed');
+}
+$('#select-chats').addEventListener('click', () => setSelecting(true));
+$('#bulk-cancel').addEventListener('click', () => setSelecting(false));
+$('#bulk-delete').addEventListener('click', (e) => {
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  armDelete(e.currentTarget, async () => {
+    await deleteChats(ids);
+    setSelecting(false);
+  }, `Apagar ${ids.length}? Confirma`);
+});
+function updateDeleteButton() {
+  $('#delete-chat').hidden = !state.chatId;
+}
+$('#delete-chat').addEventListener('click', (e) => {
+  if (!state.chatId) return;
+  const id = state.chatId;
+  armDelete(e.currentTarget, () => deleteChats([id]), 'Apagar esta conversa?');
+});
+
 async function refreshList() {
   const chats = await central.listChats();
   el.list.innerHTML = '';
   for (const c of chats) {
     const item = document.createElement('div');
-    item.className = `chat-item${c.id === state.chatId ? ' active' : ''}`;
-    item.innerHTML = `<span title="${escapeHtml(c.cwd)}">${isBusy(c.id) ? `⏳${state.running.get(c.id).size > 1 ? state.running.get(c.id).size : ''} ` : ''}${escapeHtml(c.title)}</span><button class="del" title="Apagar">✕</button>`;
-    item.addEventListener('click', () => openChat(c.id));
-    item.querySelector('.del').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await central.deleteChat(c.id);
-      if (c.id === state.chatId) { state.chatId = null; state.chat = null; renderMessages(); }
+    const picked = state.selected.has(c.id);
+    item.className = `chat-item${c.id === state.chatId ? ' active' : ''}${state.selecting ? ' selecting' : ''}${picked ? ' picked' : ''}`;
+    const busy = isBusy(c.id) ? `⏳${state.running.get(c.id).size > 1 ? state.running.get(c.id).size : ''} ` : '';
+    item.innerHTML = state.selecting
+      ? `<input type="checkbox" class="pick" ${picked ? 'checked' : ''} aria-label="Marcar" /><span title="${escapeHtml(c.cwd)}">${busy}${escapeHtml(c.title)}</span>`
+      : `<span title="${escapeHtml(c.cwd)}">${busy}${escapeHtml(c.title)}</span><button class="del" title="Apagar conversa">✕</button>`;
+    item.addEventListener('click', () => {
+      if (!state.selecting) return openChat(c.id);
+      if (state.selected.has(c.id)) state.selected.delete(c.id);
+      else state.selected.add(c.id);
+      updateBulkBar();
       refreshList();
+    });
+    item.querySelector('.del')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      armDelete(e.currentTarget, () => deleteChats([c.id]), 'Apagar?');
     });
     el.list.appendChild(item);
   }
@@ -79,7 +157,9 @@ async function refreshList() {
 
 async function openChat(id) {
   state.chatId = id;
-  state.chat = await central.getChat(id);
+  const chat = await central.getChat(id);
+  if (state.chatId !== id) return; // clicou em outra conversa enquanto esta carregava
+  state.chat = chat;
   renderMessages();
   relinkLives();
   syncCwdSelect();
@@ -88,13 +168,17 @@ async function openChat(id) {
   el.input.focus();
 }
 
-async function ensureChat() {
-  if (state.chatId) return state.chat;
-  const chat = await central.createChat(el.cwd.value || state.config.defaultCwd);
-  state.chatId = chat.id;
-  state.chat = chat;
-  refreshList();
-  return chat;
+// Uma só criação por vez: dois envios seguidos numa conversa nova não criam duas conversas.
+let creatingChat = null;
+function ensureChat() {
+  if (state.chatId) return Promise.resolve(state.chat);
+  creatingChat ||= central.createChat(el.cwd.value || state.config.defaultCwd).then((chat) => {
+    state.chatId = chat.id;
+    state.chat = chat;
+    refreshList();
+    return chat;
+  }).finally(() => { creatingChat = null; });
+  return creatingChat;
 }
 
 // ---------- Mensagens ----------
@@ -103,6 +187,7 @@ function renderMessages() {
   const msgs = state.chat?.messages || [];
   el.empty.hidden = msgs.length > 0;
   el.title.textContent = state.chat?.title || 'Nova conversa';
+  updateDeleteButton();
   for (const m of msgs) appendMessage(m);
   scrollBottom(true);
 }
@@ -134,14 +219,11 @@ function fillAssistant(wrap, m, { live = false } = {}) {
     : '';
   const par = m.parallel ? '<span class="tag parallel" title="Rodou ao mesmo tempo que outra tarefa desta conversa">⫽ paralelo</span>' : '';
   meta.innerHTML = `${providerTag(m)}${par}<span title="${escapeHtml(reasons)}">${escapeHtml(m.route?.label || '')}</span>${tokens ? `<span>${tokens}</span>` : ''}${wa}${
-    live ? '' : '<button class="act" data-a="copy" title="Copiar">⧉</button><button class="act" data-a="speak" title="Ler em voz alta">🔊</button><button class="act" data-a="whatsapp" title="Enviar para o meu WhatsApp">📱</button>'
+    live ? '' : '<button class="act" data-a="copy" title="Copiar">⧉</button><button class="act" data-a="speak" title="Ler em voz alta">🔊</button>'
   }`;
   meta.querySelector('[data-a=copy]')?.addEventListener('click', () => navigator.clipboard.writeText(m.text || ''));
   meta.querySelector('[data-a=speak]')?.addEventListener('click', () => central.speak(m.text || ''));
-  meta.querySelector('[data-a=whatsapp]')?.addEventListener('click', async () => {
-    const r = await callSafe(central.whatsappSend(m.text || ''), 'WhatsApp: ');
-    if (r != null) toast('Enviado para o seu WhatsApp.');
-  });
+
 
   const tools = wrap.querySelector('.tools');
   const list = m.tools || [];
@@ -166,8 +248,41 @@ function fillAssistant(wrap, m, { live = false } = {}) {
       }),
     );
   }
-  if (!live) renderDrafts(wrap, m);
+
   if (!live) renderImprovementOffer(wrap, m);
+  if (!live) renderPcActions(wrap, m);
+}
+
+// Ações da Ohara-AI no PC que esperam confirmação (fechar programa, apagar, desligar...).
+// O botão só diz qual item confirmar: o que roda é o que ficou guardado na mensagem.
+const PC_ACTION_LABEL = { pending: '', running: 'fazendo…', done: '✓ feito', error: '⚠️ falhou', cancelled: 'cancelada', expired: 'expirou' };
+function renderPcActions(wrap, m) {
+  wrap.querySelector('.pc-actions')?.remove();
+  if (!m.pcActions?.length) return;
+  const box = document.createElement('div');
+  box.className = 'pc-actions';
+  box.innerHTML = m.pcActions
+    .map((a, i) => {
+      const pending = a.status === 'pending';
+      const detail = a.status === 'done' ? a.result : a.status === 'error' ? a.error : '';
+      return `<div class="pc-action ${escapeHtml(a.status)}" data-i="${i}">
+        <span class="what">⚙️ ${escapeHtml(a.resumo)}</span>
+        ${pending ? '<button class="btn small-btn primary" data-a="ok">Confirmar</button><button class="btn small-btn" data-a="no">Cancelar</button>' : `<span class="state">${escapeHtml(PC_ACTION_LABEL[a.status] || a.status)}${detail ? ` · ${escapeHtml(detail)}` : ''}</span>`}
+      </div>`;
+    })
+    .join('');
+  box.querySelectorAll('.pc-action').forEach((row) => {
+    const i = Number(row.dataset.i);
+    row.querySelector('[data-a=ok]')?.addEventListener('click', async (e) => {
+      // Só clique de verdade (mouse/teclado): clique gerado por script não confirma ação no PC.
+      if (!e.isTrusted) return;
+      e.target.disabled = true;
+      const r = await central.pcActionConfirm(state.chatId, m.id, i);
+      if (!r?.ok) row.querySelector('.what').insertAdjacentHTML('afterend', `<span class="state">⚠️ ${escapeHtml(r?.error || 'falhou')}</span>`);
+    });
+    row.querySelector('[data-a=no]')?.addEventListener('click', () => central.pcActionCancel(state.chatId, m.id, i));
+  });
+  wrap.appendChild(box);
 }
 
 // Ela se ofereceu para se alterar: um clique aceita (o mesmo que responder "sim").
@@ -186,36 +301,6 @@ function renderImprovementOffer(wrap, m) {
   wrap.appendChild(box);
 }
 
-// Mensagem para contato: só sai depois do clique em "Enviar".
-function renderDrafts(wrap, m) {
-  wrap.querySelector('.wa-drafts')?.remove();
-  if (!m.whatsappDrafts?.length) return;
-  const box = document.createElement('div');
-  box.className = 'wa-drafts';
-  const label = { pending: 'aguardando sua confirmação', sending: 'enviando…', sent: 'enviada', cancelled: 'cancelada', error: 'não enviada' };
-  box.innerHTML = m.whatsappDrafts
-    .map((d, i) => `<div class="wa-draft ${d.status}">
-      <div class="wa-head">📱 WhatsApp para <b>${escapeHtml(d.sentTo || d.to)}</b> <span class="muted small">· ${label[d.status] || d.status}</span></div>
-      <div class="wa-text">${escapeHtml(d.text)}</div>
-      ${d.error ? `<p class="error small">⚠️ ${escapeHtml(d.error)}</p>` : ''}
-      ${d.status === 'pending' || d.status === 'error' ? `<div class="row"><button class="btn small-btn primary" data-wa="send" data-i="${i}">${d.status === 'error' ? 'Tentar de novo' : 'Enviar'}</button><button class="btn small-btn" data-wa="cancel" data-i="${i}">Cancelar</button></div>` : ''}
-    </div>`)
-    .join('');
-  box.querySelectorAll('[data-wa]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      const i = Number(b.dataset.i);
-      b.disabled = true;
-      if (b.dataset.wa === 'send') {
-        const r = await central.whatsappConfirm(state.chatId, m.id, i);
-        if (r?.ok) toast(`Enviada para ${r.data.sentTo || r.data.to}.`);
-      } else {
-        await central.whatsappCancel(state.chatId, m.id, i);
-      }
-    }),
-  );
-  wrap.appendChild(box);
-}
-
 function scrollBottom(force = false) {
   const m = el.messages;
   if (force || m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight;
@@ -228,8 +313,20 @@ async function sendMessage() {
   const text = el.input.value.trim();
   if (!text) return;
 
-  const chat = await ensureChat();
-  const images = state.attachments.map((a) => a.path);
+  // Limpa o campo antes de esperar: um Enter duplo não manda o mesmo pedido duas vezes.
+  const attachments = state.attachments;
+  el.input.value = '';
+  state.attachments = [];
+  let chat;
+  try {
+    chat = await ensureChat();
+  } catch (err) {
+    if (!el.input.value) el.input.value = text;
+    state.attachments = attachments;
+    renderAttachments();
+    throw err;
+  }
+  const images = attachments.map((a) => a.path);
   const runId = crypto.randomUUID();
   const parallel = isBusy(chat.id);
   const userMsg = { role: 'user', text, images };
@@ -327,7 +424,7 @@ central.onDone(async ({ chatId, runId, message, source }) => {
       fillAssistant(live.wrap, live.msg);
       scrollBottom();
       const fresh = await central.getChat(chatId);
-      el.title.textContent = fresh.title;
+      if (fresh) el.title.textContent = fresh.title; // a conversa pode ter sido apagada enquanto rodava
     }
   } else if (chatId === state.chatId) {
     // Terminou uma conversa que foi reaberta no meio da execução.
@@ -350,7 +447,7 @@ function schedulePreview() {
     const text = el.input.value.trim();
     if (!text) { el.badge.hidden = true; return; }
     const r = await central.previewRoute(text, { hasImage: state.attachments.length > 0, override: el.model.value, chatId: state.chatId });
-    const name = r.provider === 'codex' ? 'Codex' : r.provider === 'local' ? 'Ohara' : 'Claude';
+    const name = { codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[r.provider] || 'Claude';
     el.badge.innerHTML = `→ <b class="${r.provider}">${name} ${escapeHtml(r.model)}</b> · ${escapeHtml(r.label)}${r.reasons.length > 1 ? ` · ${escapeHtml(r.reasons.slice(1).join(' · '))}` : ''}`;
     el.badge.title = r.reasons.join('\n');
     el.badge.hidden = false;
@@ -391,7 +488,8 @@ $('#btn-image').addEventListener('click', async () => {
   schedulePreview();
 });
 
-// 🎤: com o Whisper instalado grava e transcreve aqui mesmo; sem ele, abre o ditado do Windows (Win+H).
+// 🎤 Ditado: grava, o Whisper transcreve e o texto entra no campo para você revisar e enviar.
+// Nunca envia sozinho. Sem o Whisper instalado, abre o ditado do Windows (Win+H).
 let recording = null;
 $('#btn-voice').addEventListener('click', async () => {
   const btn = $('#btn-voice');
@@ -412,12 +510,13 @@ $('#btn-voice').addEventListener('click', async () => {
     const bytes = await recording.done;
     btn.classList.remove('rec');
     btn.style.boxShadow = '';
-    btn.title = 'Falar';
+    btn.title = 'Ditar: fale e o texto aparece aqui para você revisar e enviar';
     recording = null;
     if (!bytes) return toast('Não ouvi nada.');
     btn.textContent = '⏳';
     const text = await Voice.transcribe(bytes);
     btn.textContent = '🎤';
+    if (!text) return toast('Não consegui entender o áudio.');
     el.input.value = (el.input.value ? `${el.input.value} ` : '') + text;
     autosize();
     schedulePreview();
@@ -426,6 +525,7 @@ $('#btn-voice').addEventListener('click', async () => {
     recording = null;
     btn.textContent = '🎤';
     btn.classList.remove('rec');
+    btn.style.boxShadow = '';
     toast(`Voz: ${err.message}`, 'error');
   }
 });
@@ -507,6 +607,15 @@ function fmtReset(sec) {
   return d.toLocaleString('pt-BR', { weekday: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
+// Codex desligado nos Ajustes: some do menu de modelos e dos medidores de cota.
+function applyCodex() {
+  const on = state.config?.codex?.enabled === true;
+  for (const o of el.model.querySelectorAll('option[value^="codex"]')) { o.hidden = !on; o.disabled = !on; }
+  if (!on && el.model.value.startsWith('codex')) el.model.value = 'auto';
+  for (const m of document.querySelectorAll('.meter[data-key^="codex"]')) m.hidden = !on;
+}
+central.onConfigChanged((cfg) => { state.config = cfg; applyCodex(); });
+
 function renderUsage(u) {
   const c = u.limits.claude || {};
   const x = u.limits.codex || {};
@@ -516,7 +625,8 @@ function renderUsage(u) {
   setMeter('codex-7d', x.weekly, x.weeklyResetsAt);
   const t = u.today;
   const tot = (p) => fmtNum(p.input + p.cached + p.output);
-  $('#usage-today').innerHTML = `Hoje: Claude ${t.claude.calls} pedidos (${tot(t.claude)} tokens)<br>Codex ${t.codex.calls} pedidos (${tot(t.codex)} tokens)`;
+  const codex = state.config?.codex?.enabled === true ? `<br>Codex ${t.codex.calls} pedidos (${tot(t.codex)} tokens)` : '';
+  $('#usage-today').innerHTML = `Hoje: Claude ${t.claude.calls} pedidos (${tot(t.claude)} tokens)${codex}`;
 }
 
 central.onMessage(({ chatId, message }) => {
@@ -619,7 +729,21 @@ async function newChatWithPrompt(text, { cwd, send = false, override } = {}) {
 (async function init() {
   state.config = await central.getConfig();
   central.appVersion().then((v) => { document.getElementById('app-version').textContent = 'v' + v; });
+  // Versão nova: avisa enquanto baixa e oferece reiniciar quando estiver pronta.
+  const showUpdate = (s) => {
+    const banner = document.getElementById('update-banner');
+    const btn = document.getElementById('update-install');
+    const txt = document.getElementById('update-text');
+    if (s?.status === 'downloading') txt.textContent = `Baixando a versão ${s.version}${s.percent ? ` (${s.percent}%)` : ''}…`;
+    else if (s?.status === 'ready') txt.textContent = `Versão ${s.version} pronta para instalar.`;
+    banner.hidden = !['downloading', 'ready'].includes(s?.status);
+    btn.hidden = s?.status !== 'ready';
+  };
+  document.getElementById('update-install').onclick = () => central.updateInstall();
+  central.onUpdateStatus(showUpdate);
+  central.updateState().then(showUpdate).catch(() => {});
   el.speak.checked = !!state.config.voice.speakReplies;
+  applyCodex();
   await loadRepos();
   syncCwdSelect();
   await refreshList();

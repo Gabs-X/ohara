@@ -1,0 +1,68 @@
+{
+  "appId": "com.gabsx.ohara-guia",
+  "productName": "Ohara Guia",
+  "directories": {
+    "output": "dist-guia"
+  },
+  "files": [
+    "package.json",
+    "src/guia/**/*",
+    "src/assets/**/*",
+    "src/renderer/markdown.js",
+    "src/updater.js",
+    "src/core/providers/**/*",
+    "src/core/router.js",
+    "src/core/multi-router.js",
+    "src/core/usage.js",
+    "src/core/store.js",
+    "src/core/savings.js",
+    "src/core/checkpoints.js",
+    "src/core/health.js",
+    "src/core/project-runner.js",
+    "src/core/development.js",
+    "src/core/desktop-probe.js",
+    "src/renderer/tools.js",
+    "src/core/doc-index.js",
+    "src/core/doc-text.js",
+    "src/core/local-llm.js",
+    "src/core/local-tools.js",
+    "src/core/ipc-guard.js",
+    "src/core/ps.js",
+    "src/core/pc-tools.js",
+    "src/core/pc-actions.js",
+    "src/core/local-chat.js",
+    "src/core/brief.js",
+    "src/core/ollama-pull.js"
+  ],
+  "extraMetadata": {
+    "main": "src/guia/main.js",
+    "name": "ohara-guia",
+    "productName": "Ohara Guia",
+    "description": "Ohara Guia: assistente que orquestra várias IAs (Claude, Codex, Gemini e IA local) para quem não é desenvolvedor."
+  },
+  "win": {
+    "icon": "build/icon.ico",
+    "signAndEditExecutable": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Ohara Guia",
+    "artifactName": "Ohara-Guia-Setup-${version}.${ext}"
+  },
+  "portable": {
+    "artifactName": "Ohara-Guia-Portatil-${version}.${ext}"
+  },
+  "afterPack": "build/after-pack.js",
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "Gabs-X",
+      "repo": "ohara-guia",
+      "releaseType": "release"
+    }
+  ]
+}

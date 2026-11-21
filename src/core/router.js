@@ -92,6 +92,8 @@ function countHits(text, words) {
   return hits;
 }
 
+const SELF_CTX_RE = / (na|no|da|do|pra|pro|para|em|projeto|repo|repositorio|codigo|app|aplicativo)( d[ao])? $/;
+
 // Acha um projeto citado pelo nome ("taverna bot" → taverna-bot).
 function findProject(text, projects = []) {
   const flat = text.replace(/[-_]/g, ' ');
@@ -100,6 +102,12 @@ function findProject(text, projects = []) {
     const name = normalize(p.name).trim().replace(/[-_]/g, ' ');
     if (name.length < 4) continue;
     if (flat.includes(` ${name} `) || flat.includes(` ${name.replace(/ /g, '')} `)) {
+      // O repositório da própria Ohara: "ohara, tem como..." é chamamento, não o projeto.
+      // Só conta com contexto de projeto antes ("na ohara", "no código da ohara").
+      if (p.self) {
+        const i = flat.indexOf(` ${name} `);
+        if (i < 0 || !SELF_CTX_RE.test(flat.slice(0, i + 1))) continue;
+      }
       if (!found || name.length > found.len) found = { ...p, len: name.length };
     }
   }
@@ -159,6 +167,10 @@ function maxUtil(usage) {
   return Math.max(usage.fiveHour ?? 0, usage.weekly ?? 0);
 }
 
+/** O Codex só entra quando está ligado nos Ajustes (codex.enabled). */
+const codexOn = (config) => config?.codex?.enabled === true;
+const CODEX_OFF = 'o Codex está desligado nos Ajustes: enviado ao Claude';
+
 /**
  * Decide a rota final.
  * @param {string} prompt
@@ -172,8 +184,12 @@ function route(prompt, opts = {}) {
   // Escolha manual na interface.
   if (override && override !== 'auto') {
     const [provider, tier] = override.split(':');
-    if (provider === 'codex') {
+    if (provider === 'codex' && codexOn(config)) {
       return { provider: 'codex', model: config.codex.model || 'padrão', effort: tier || 'medium', category: 'manual', label: 'Escolha manual', reasons: ['escolhido manualmente'] };
+    }
+    if (provider === 'codex') {
+      const t = tier === 'high' ? 'profundo' : 'equilibrado';
+      return { provider: 'claude', model: models[t], tier: t, effort: tier === 'high' ? 'high' : 'medium', category: 'manual', label: 'Escolha manual', reasons: [CODEX_OFF] };
     }
     return { provider: 'claude', model: models[tier] || tier, tier, effort: tier === 'profundo' ? 'high' : 'medium', category: 'manual', label: 'Escolha manual', reasons: ['escolhido manualmente'] };
   }
@@ -189,15 +205,17 @@ function route(prompt, opts = {}) {
   const learned = opts.learned?.[category];
   if (learned) {
     const [lp, lt] = learned.split(':');
-    if (lp === 'codex') {
+    // Preferência antiga pelo Codex com ele desligado: fica com a rota da categoria.
+    if (lp === 'codex' && codexOn(config)) {
       provider = 'codex';
       effort = lt === 'high' ? 'high' : lt === 'low' ? 'low' : 'medium';
-    } else if (models[lt]) {
+      reasons.push(`aprendido: você costuma usar ${learnedLabel(learned)} aqui`);
+    } else if (lp !== 'codex' && models[lt]) {
       provider = 'claude';
       tier = lt;
       effort = lt === 'profundo' ? 'high' : lt === 'rapido' ? 'low' : 'medium';
+      reasons.push(`aprendido: você costuma usar ${learnedLabel(learned)} aqui`);
     }
-    reasons.push(`aprendido: você costuma usar ${learnedLabel(learned)} aqui`);
   }
 
   const claudeUtil = maxUtil(usage.claude);
@@ -206,9 +224,16 @@ function route(prompt, opts = {}) {
   const codexBlocked = codexUtil >= 0.99;
   const q = config.quota;
 
+  // Codex desligado: tudo vai para o Claude (código pesado no Opus, o resto no Sonnet).
+  if (provider === 'codex' && !codexOn(config)) {
+    provider = 'claude';
+    tier = effort === 'high' ? 'profundo' : 'equilibrado';
+    reasons.push(CODEX_OFF);
+  }
+
   // O Codex também executa comandos e aceita imagem (-i), então serve de reserva para tudo.
   if (provider === 'claude') {
-    if ((claudeBlocked || claudeUtil >= q.claudeAvoidAt) && !codexBlocked && codexUtil < q.codexAvoidAt) {
+    if (codexOn(config) && (claudeBlocked || claudeUtil >= q.claudeAvoidAt) && !codexBlocked && codexUtil < q.codexAvoidAt) {
       provider = 'codex';
       reasons.push(`cota do Claude em ${Math.round(claudeUtil * 100)}%: enviado ao Codex`);
     } else if (tier === 'profundo' && claudeUtil >= q.claudeDowngradeAt) {
@@ -220,6 +245,19 @@ function route(prompt, opts = {}) {
       provider = 'claude';
       tier = 'equilibrado';
       reasons.push(`cota do Codex em ${Math.round(codexUtil * 100)}%: enviado ao Claude`);
+    }
+  }
+
+  // Precisa do Chrome logado (LinkedIn, vagas...): só o Claude tem a extensão Claude in Chrome.
+  // Vale mesmo com a cota apertada; só fica no Codex se o Claude estiver bloqueado.
+  if (opts.browser && provider === 'codex') {
+    if (!claudeBlocked) {
+      provider = 'claude';
+      if (!models[tier] || tier === 'rapido') tier = 'equilibrado';
+      if (effort !== 'high') effort = 'medium';
+      reasons.push('precisa do Chrome logado: enviado ao Claude, que tem a extensão do navegador');
+    } else {
+      reasons.push('precisa do Chrome, mas a cota do Claude acabou: o Codex faz o que der sem navegador');
     }
   }
 
@@ -254,4 +292,4 @@ function learnPreferences(overrides, minVotes = 3) {
   return out;
 }
 
-module.exports = { route, classify, learnPreferences, learnedLabel, CATEGORIES, normalize };
+module.exports = { route, codexOn, classify, findProject, learnPreferences, learnedLabel, CATEGORIES, normalize };

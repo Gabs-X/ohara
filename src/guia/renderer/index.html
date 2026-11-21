@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: file:; style-src 'self'; script-src 'self'" />
+  <title>Ohara Guia</title>
+  <link rel="stylesheet" href="guia.css" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="../../assets/icon.png" alt="" />
+      <span>Ohara <b class="edition">Guia</b> <small id="app-version"></small></span>
+    </div>
+    <div id="update-banner" class="update-banner" hidden>
+      <span id="update-text"></span>
+      <button id="update-install" class="btn small" hidden>Reiniciar e atualizar</button>
+    </div>
+    <nav class="tabs" aria-label="Seções">
+      <button class="tab" data-view="chat">💬<span>Conversas</span></button>
+      <button class="tab" data-view="plans">🗺️<span>Planos</span></button>
+      <button class="tab" data-view="tools">🧰<span>Ferramentas</span></button>
+      <button class="tab" data-view="usage">📊<span>Uso e economia</span></button>
+      <button class="tab" data-view="health">🩺<span>Primeiros passos</span><b id="health-badge" class="badge" hidden></b></button>
+      <button class="tab" data-view="settings">⚙️<span>Ajustes</span></button>
+    </nav>
+    <div class="side-chat">
+      <button id="new-chat" class="btn primary wide">+ Nova conversa</button>
+      <div class="chat-tools"><button id="select-chats" class="link-btn" title="Marcar várias conversas para apagar">Selecionar</button></div>
+      <div id="bulk-bar" class="bulk-bar" hidden><span id="bulk-count">0 marcadas</span><button id="bulk-delete" class="btn small danger" disabled>Apagar</button><button id="bulk-cancel" class="btn small">Cancelar</button></div>
+      <nav id="chat-list" class="chat-list"></nav>
+    </div>
+    <div class="side-spacer" hidden></div>
+    <section class="side-quota" id="side-quota" aria-label="Cota das IAs"></section>
+  </aside>
+
+  <!-- Conversas -->
+  <main class="main" id="view-chat">
+    <header class="topbar">
+      <h1 id="chat-title">Nova conversa</h1>
+      <div class="top-actions">
+        <button id="delete-chat" class="btn small ghost" title="Apagar esta conversa" hidden>🗑 Apagar</button>
+        <select id="project-select" title="Pasta do projeto onde a IA trabalha"></select>
+        <button id="run-project" class="btn small" title="Abrir o projeto para ver funcionando" hidden>▶ Abrir meu projeto</button>
+        <button id="open-folder" class="btn small icon" title="Abrir a pasta do projeto" hidden>📁</button>
+        <label class="toggle" title="Desligado (recomendado): as IAs pedem licença para comandos arriscados. Ligado: sem travas.">
+          <input type="checkbox" id="full-access" /><span>Acesso total</span>
+        </label>
+      </div>
+    </header>
+    <section id="messages" class="messages">
+      <div class="empty" id="empty">
+        <h2 id="hello">O que vamos criar hoje?</h2>
+        <p>Peça do seu jeito. A Ohara escolhe sozinha a IA mais barata que resolve, guarda um ponto de restauração do projeto
+          antes de mexer e explica o que fez.</p>
+        <div class="suggestions">
+          <button class="chip" data-s="Quero criar um site simples de uma página para apresentar o meu trabalho. Por onde começo?">Criar um site simples</button>
+          <button class="chip" data-s="Me ajuda a montar uma planilha para controlar as minhas despesas do mês">Planilha de despesas</button>
+          <button class="chip" data-s="Organize os arquivos desta pasta em subpastas por tipo">Organizar uma pasta</button>
+          <button class="chip" data-plan="1">🗺️ Planejar uma ideia</button>
+        </div>
+      </div>
+    </section>
+    <footer class="composer">
+      <div id="attachments" class="attachments"></div>
+      <textarea id="input" rows="1" placeholder="Pergunte ou peça algo… (Enter envia, Shift+Enter quebra linha)"></textarea>
+      <div class="composer-bar">
+        <div class="left">
+          <button class="icon-btn" id="btn-screen" title="Anexar print da tela">🖥️</button>
+          <button class="icon-btn" id="btn-image" title="Anexar imagem">🖼️</button>
+          <span id="route-badge" class="route-badge" hidden></span>
+        </div>
+        <div class="right">
+          <select id="model-select" title="Qual IA usar"></select>
+          <button id="send" class="btn primary">Enviar</button>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <main class="main" id="view-plans" hidden>
+    <header class="topbar"><h1>Planos</h1><div class="top-actions"><button id="plan-new" class="btn primary small">+ Novo plano</button></div></header>
+    <section class="body plans-body">
+      <nav id="plan-list" class="plan-list"></nav>
+      <div id="plan-detail" class="plan-detail"></div>
+    </section>
+  </main>
+
+  <main class="main" id="view-tools" hidden>
+    <header class="topbar"><h1>Ferramentas locais</h1><div class="top-actions"><span class="muted small">IA local · sem cota · nada sai do PC</span></div></header>
+    <section class="body" id="tools-body"></section>
+  </main>
+
+  <main class="main" id="view-usage" hidden>
+    <header class="topbar"><h1>Uso e economia</h1></header>
+    <section class="body" id="usage-body"></section>
+  </main>
+
+  <main class="main" id="view-health" hidden>
+    <header class="topbar"><h1>Primeiros passos</h1><div class="top-actions"><button id="health-recheck" class="btn small">↻ Verificar de novo</button></div></header>
+    <section class="body" id="health-body"></section>
+  </main>
+
+  <main class="main" id="view-settings" hidden>
+    <header class="topbar"><h1>Ajustes</h1></header>
+    <section class="body" id="settings-body"></section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <div id="modal" class="modal" hidden><div class="modal-card" id="modal-card"></div></div>
+
+  <script src="../../renderer/markdown.js"></script>
+  <script src="app.js"></script>
+  <script src="../../renderer/tools.js"></script>
+</body>
+</html>

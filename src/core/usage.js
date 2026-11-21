@@ -10,9 +10,10 @@ function today() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+const emptyProvider = () => ({ calls: 0, input: 0, cached: 0, output: 0, costUsd: 0, byModel: {} });
+
 function emptyDay() {
-  const p = () => ({ calls: 0, input: 0, cached: 0, output: 0, costUsd: 0, byModel: {} });
-  return { claude: p(), codex: p() };
+  return { claude: emptyProvider(), codex: emptyProvider() };
 }
 
 class UsageTracker {
@@ -20,6 +21,8 @@ class UsageTracker {
     this.store = store; // JsonStore { days: {}, limits: { claude, codex } }
     if (!this.store.data.days) this.store.data.days = {};
     if (!this.store.data.limits) this.store.data.limits = { claude: null, codex: null };
+    // Trocado pelo main.js: com o Codex desligado nos Ajustes, nem lê as sessões de ~/.codex.
+    this.codexOn = () => true;
   }
 
   day(key = today()) {
@@ -32,8 +35,8 @@ class UsageTracker {
     const f = ((day.byFeature ||= {})[feature] ||= { calls: 0, tokens: 0, claude: 0, codex: 0 });
     f.calls += 1;
     f.tokens += input + cached + output;
-    f[provider] += input + cached + output;
-    const p = day[provider];
+    f[provider] = (f[provider] || 0) + input + cached + output;
+    const p = (day[provider] ||= emptyProvider()); // outras IAs (Gemini, local) entram na primeira vez
     p.calls += 1;
     p.input += input;
     p.cached += cached;
@@ -61,15 +64,18 @@ class UsageTracker {
   }
 
   // Lê o "rate_limits" mais recente das sessões do Codex.
+  // Nunca lança: é chamado no fim de cada resposta e um erro aqui impediria o "chat:done".
   refreshCodexLimits() {
-    const file = latestCodexSession();
-    if (!file) return this.store.data.limits.codex;
+    if (!this.codexOn()) return null;
     try {
+      const file = latestCodexSession();
+      if (!file) return this.store.data.limits.codex;
       const text = readTail(file, 256 * 1024);
       const lines = text.split('\n').reverse();
       for (const line of lines) {
         if (!line.includes('"rate_limits"')) continue;
-        const obj = JSON.parse(line);
+        let obj;
+        try { obj = JSON.parse(line); } catch { continue; } // linha ainda sendo escrita pelo Codex
         const rl = findKey(obj, 'rate_limits');
         if (!rl?.primary) continue;
         this.store.data.limits.codex = {
@@ -89,6 +95,11 @@ class UsageTracker {
     return this.store.data.limits.codex;
   }
 
+  /** Pedidos feitos hoje a uma IA (para estimar a cota das que não informam o uso). */
+  callsToday(provider) {
+    return this.day()[provider]?.calls || 0;
+  }
+
   limits() {
     const l = this.store.data.limits;
     // Se a janela já reiniciou, zera o valor exibido.
@@ -100,7 +111,7 @@ class UsageTracker {
       if (y.weeklyResetsAt && now > y.weeklyResetsAt) y.weekly = 0;
       return y;
     };
-    return { claude: fix(l.claude), codex: fix(l.codex) };
+    return { claude: fix(l.claude), codex: this.codexOn() ? fix(l.codex) : null };
   }
 
   summary() {
@@ -141,7 +152,12 @@ function latestCodexSession() {
     for (const e of entries) {
       if (e.isFile() && e.name.endsWith('.jsonl')) {
         const full = path.join(dir, e.name);
-        const mtime = fs.statSync(full).mtimeMs;
+        let mtime;
+        try {
+          mtime = fs.statSync(full).mtimeMs;
+        } catch {
+          continue; // sessão apagada no meio da leitura
+        }
         if (!best || mtime > best.mtime) best = { full, mtime };
       }
     }

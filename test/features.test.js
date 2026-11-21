@@ -3,7 +3,12 @@ const assert = require('node:assert');
 const { parseICS, expand, meetCode } = require('../src/integrations/calendar');
 const { learnPreferences, route } = require('../src/core/router');
 const { pickProvider } = require('../src/core/ai');
-const { DEFAULT_CONFIG: config } = require('../src/core/config');
+const { DEFAULT_CONFIG } = require('../src/core/config');
+
+const config = structuredClone(DEFAULT_CONFIG);
+config.codex.enabled = true;
+// Os testes de orçamento abaixo exercitam o modo "auto" (os padrões agora usam o modelo local).
+for (const k of ['briefing', 'busca']) config.features[k].provider = 'auto';
 
 const ICS = `BEGIN:VCALENDAR
 BEGIN:VEVENT
@@ -55,14 +60,43 @@ test('roteador aprende após 3 escolhas iguais', () => {
 
 test('orçamento: segundo plano troca para o Codex antes do chat', () => {
   const limits = { claude: { fiveHour: 0.75 }, codex: { fiveHour: 0.1 } };
-  assert.equal(pickProvider('meetings', limits, config).provider, 'codex');
+  assert.equal(pickProvider('briefing', limits, config).provider, 'codex');
   assert.equal(pickProvider('busca', limits, config).provider, 'claude');
 });
 
 test('orçamento: com as duas cotas altas, segundo plano é adiado', () => {
   const reset = Math.floor(Date.now() / 1000) + 3600;
   const limits = { claude: { fiveHour: 0.8, fiveHourResetsAt: reset }, codex: { fiveHour: 0.9, fiveHourResetsAt: reset + 100 } };
-  const r = pickProvider('meetings', limits, config);
+  const r = pickProvider('briefing', limits, config);
   assert.ok(r.defer);
   assert.ok(r.defer >= reset * 1000);
+});
+
+test('análise de reunião é sempre no Claude, mesmo com o Codex ligado e a cota do Claude alta', () => {
+  assert.equal(DEFAULT_CONFIG.features.meetings.provider, 'claude');
+  assert.equal(DEFAULT_CONFIG.meetings.autoAnalyze, false, 'reunião nova espera você pedir a análise');
+  assert.equal(pickProvider('meetings', { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0 } }, config).provider, 'claude');
+});
+
+test('Codex desligado (o padrão): as funções automáticas não usam ele nem como reserva', () => {
+  const off = structuredClone(DEFAULT_CONFIG);
+  off.features.meetings.provider = 'codex';
+  assert.equal(pickProvider('meetings', { claude: { fiveHour: 0.1 } }, off).provider, 'claude');
+  off.features.briefing.provider = 'auto';
+  const r = pickProvider('briefing', { claude: { fiveHour: 0.95, fiveHourResetsAt: Date.now() / 1000 + 600 }, codex: { fiveHour: 0 } }, off);
+  assert.ok(r.defer, 'espera a cota do Claude em vez de ir para o Codex');
+  assert.doesNotMatch(r.reason, /Codex/);
+});
+
+test('provedor ollama: respeita a função e liga/desliga pela config', () => {
+  const c = structuredClone(DEFAULT_CONFIG);
+  c.features.correcao.provider = 'ollama';
+  assert.equal(pickProvider('correcao', {}, c).provider, 'ollama');
+  c.ollama.enabled = false;
+  assert.equal(pickProvider('correcao', {}, c).provider, 'claude');
+});
+
+test('padrão: funções automáticas leves rodam no modelo local; reuniões seguem no Claude', () => {
+  for (const k of ['briefing', 'busca', 'cobranca', 'slack', 'correcao']) assert.equal(pickProvider(k, {}, DEFAULT_CONFIG).provider, 'ollama', k);
+  assert.equal(pickProvider('meetings', {}, DEFAULT_CONFIG).provider, 'claude');
 });

@@ -15,14 +15,19 @@ class Slack {
   async call(method, params = {}, post = false) {
     if (!this.token) throw new Error('Slack não configurado: falta o token em Configurações.');
     const headers = { Authorization: `Bearer ${this.token}` };
+    const signal = AbortSignal.timeout(20_000); // rede travada não pode prender a tela de Ajustes
     let res;
-    if (post) {
-      res = await fetch(API + method, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(params) });
-    } else {
-      const qs = new URLSearchParams(params).toString();
-      res = await fetch(`${API}${method}?${qs}`, { headers });
+    try {
+      if (post) {
+        res = await fetch(API + method, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(params), signal });
+      } else {
+        const qs = new URLSearchParams(params).toString();
+        res = await fetch(`${API}${method}?${qs}`, { headers, signal });
+      }
+    } catch (err) {
+      throw new Error(err.name === 'TimeoutError' ? 'o Slack não respondeu a tempo' : `sem conexão com o Slack (${err.message})`);
     }
-    const data = await res.json();
+    const data = await res.json().catch(() => ({ ok: false, error: `resposta inválida (HTTP ${res.status})` }));
     if (!data.ok) throw new Error(`Slack ${method}: ${data.error}`);
     return data;
   }
@@ -54,18 +59,22 @@ class Slack {
   async findUser(name) {
     const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
     const n = norm(name);
+    if (n.length < 2) return null; // nome vazio casava com todo mundo sem display_name
     const first = n.split(' ')[0];
     const users = await this.#loadUsers();
+    // Prefixo só conta como palavra inteira e com pelo menos 3 letras ("jo" não é "joão silva").
+    const prefix = (a, b) => b.length >= 3 && (a === b || a.startsWith(`${b} `));
     const score = (u) => {
-      const names = [u.real_name, u.profile?.real_name, u.profile?.display_name, u.name].map(norm);
+      const names = [u.real_name, u.profile?.real_name, u.profile?.display_name, u.name].map(norm).filter(Boolean);
       if (names.includes(n)) return 3;
-      if (names.some((x) => x && (x.startsWith(n) || n.startsWith(x)))) return 2;
-      if (names.some((x) => x.split(' ')[0] === first)) return 1;
+      if (names.some((x) => prefix(x, n) || prefix(n, x))) return 2;
+      if (first.length >= 3 && names.some((x) => x.split(' ')[0] === first)) return 1;
       return 0;
     };
     const ranked = users.map((u) => ({ u, s: score(u) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
     if (!ranked.length) return null;
-    if (ranked.length > 1 && ranked[0].s === 1 && ranked[1].s === 1) return null; // ambíguo só pelo primeiro nome
+    // Empate no melhor nível: não adivinha para quem mandar.
+    if (ranked.length > 1 && ranked[0].s === ranked[1].s) return null;
     const u = ranked[0].u;
     return { id: u.id, name: u.real_name || u.name };
   }

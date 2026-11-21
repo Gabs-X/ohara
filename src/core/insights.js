@@ -207,7 +207,7 @@ class Insights {
     if (!due.length) return 0;
     for (const w of due) w.lastAlertDay = today;
     this.meetings.store.save();
-    const people = [...new Set(due.map((w) => w.person.split(' ')[0]))];
+    const people = [...new Set(due.map((w) => String(w.person || '?').split(' ')[0]))];
     this.notify(
       `${due.length} entrega${due.length > 1 ? 's' : ''} atrasada${due.length > 1 ? 's' : ''} para você`,
       `Aguardando ${people.slice(0, 4).join(', ')}${people.length > 4 ? '…' : ''}. Abra para gerar a cobrança.`,
@@ -441,6 +441,7 @@ class Insights {
 
   saveMarkdown(key) {
     const m = this.data.meetings[key];
+    if (!m) throw new Error('Reunião não encontrada');
     const dir = path.join(this.getConfig().outputDir, 'Reunioes');
     fs.mkdirSync(dir, { recursive: true });
     const safe = String(m.title || m.code).replace(/[\\/:*?"<>|]/g, '-').slice(0, 80);
@@ -451,6 +452,7 @@ class Insights {
 
   mailto(key) {
     const m = this.data.meetings[key];
+    if (!m) throw new Error('Reunião não encontrada');
     const body = this.markdown(key).replace(/\*\*/g, '');
     const subject = `Resumo: ${m.title} (${br(m.isoDate)})`;
     return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body.slice(0, 1800))}`;

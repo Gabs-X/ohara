@@ -105,6 +105,17 @@ test('escolhe o contato certo ou recusa quando é ambíguo', () => {
 
 const { parseSendReply } = require('../src/integrations/whatsapp');
 
+test('não trata variações invisíveis do mesmo contato como ambiguidade', () => {
+  const result = pickContact('Tata', ['Tata My Amore❤️', 'Tata My Amore❤']);
+  assert.ok(result.name);
+  assert.equal(result.error, undefined);
+});
+
+test('ambiguidade mostra todos os candidatos próximos, mesmo com scores diferentes', () => {
+  const result = pickContact('Tata', ['Tata My Amore❤️', 'Minha Tata']);
+  assert.deepEqual(result.candidates, ['Tata My Amore❤️', 'Minha Tata']);
+});
+
 test('entende a confirmação do envio por texto ou voz', () => {
   for (const t of ['confirmado', 'Confirmado!', 'envie', 'envie a mensagem', 'pode enviar', 'Pode mandar agora, por favor', 'manda pra ela', 'envia pra Tata', 'confirma o envio no zap']) {
     assert.equal(parseSendReply(t, ['Tata']), 'confirm', t);

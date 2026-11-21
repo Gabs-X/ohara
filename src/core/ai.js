@@ -6,6 +6,8 @@ const path = require('path');
 const { runJsonl, shorten } = require('./providers/common');
 const { resolveCodex } = require('./providers/codex');
 const { claudeEnv, friendlyError } = require('./providers/claude');
+const { anonymize, deanonymize } = require('./local-tools');
+const { ollamaUrl, keepAlive } = require('./providers/ollama');
 
 class DeferError extends Error {
   constructor(retryAt, reason) {
@@ -24,14 +26,18 @@ const util = (l) => (l ? Math.max(l.fiveHour ?? 0, l.weekly ?? 0) : 0);
  */
 function pickProvider(feature, limits, config) {
   const f = config.features?.[feature] || {};
-  if (f.provider === 'claude' || f.provider === 'codex') return { provider: f.provider };
+  if (f.provider === 'ollama' && config.ollama?.enabled !== false) return { provider: 'ollama' };
+  // Codex desligado nos Ajustes: nem "Sempre Codex" nem a reserva por cota usam ele.
+  const codexOn = config.codex?.enabled === true;
+  if (f.provider === 'claude' || (f.provider === 'codex' && codexOn)) return { provider: f.provider };
+  if (f.provider === 'codex' || f.provider === 'ollama') return { provider: 'claude' };
 
   const background = !!f.background;
   const b = config.budgets;
   const claudeMax = background ? b.backgroundClaude : config.quota.claudeAvoidAt;
   const codexMax = background ? b.backgroundCodex : config.quota.codexAvoidAt;
   const c = limits.claude;
-  const x = limits.codex;
+  const x = codexOn ? limits.codex : { status: 'rejected' };
 
   if (c?.status !== 'rejected' && util(c) < claudeMax) return { provider: 'claude' };
   if (x?.status !== 'rejected' && util(x) < codexMax) return { provider: 'codex' };
@@ -40,7 +46,8 @@ function pickProvider(feature, limits, config) {
   // Adia até a primeira janela que renovar.
   const resets = [c?.fiveHourResetsAt, x?.fiveHourResetsAt].filter(Boolean).map((s) => s * 1000).filter((t) => t > Date.now());
   const retryAt = resets.length ? Math.min(...resets) + 60_000 : Date.now() + 30 * 60_000;
-  return { defer: retryAt, reason: `cota acima do orçamento de segundo plano (Claude ${Math.round(util(c) * 100)}%, Codex ${Math.round(util(x) * 100)}%)` };
+  const codexPart = codexOn ? `, Codex ${Math.round(util(x) * 100)}%` : '';
+  return { defer: retryAt, reason: `cota acima do orçamento de segundo plano (Claude ${Math.round(util(c) * 100)}%${codexPart})` };
 }
 
 function tryJson(s) {
@@ -75,9 +82,10 @@ async function claudeOnce({ prompt, schema, model, effort, config, usage, signal
       if (ev.type === 'result') {
         u = ev.usage || {};
         cost = ev.total_cost_usd || 0;
-        if (ev.is_error) error = ev.result || ev.subtype;
+        if (ev.is_error) error = ev.result || ev.subtype || 'erro';
         text = ev.result || '';
-        out = schema ? ev.structured_output || tryJson(ev.result) : text;
+        // Com erro (cota, API Error 529...) o "result" é a mensagem de erro, não a resposta.
+        out = error ? null : schema ? ev.structured_output || tryJson(ev.result) : text;
       }
     },
   });
@@ -125,9 +133,35 @@ async function codexOnce({ prompt, schema, effort, config, usage, signal }) {
   }
 }
 
+// IA local (Ollama). Sem custo e sem cota: não entra na contagem de uso.
+async function ollamaOnce({ prompt, schema, config, signal }) {
+  const o = config.ollama || {};
+  const timeout = AbortSignal.timeout((o.timeoutSec || 120) * 1000);
+  const body = { model: o.model, stream: false, messages: [{ role: 'user', content: prompt }], keep_alive: keepAlive(config) };
+  if (schema) body.format = schema;
+  if (o.contextTokens) body.options = { num_ctx: o.contextTokens };
+  let res;
+  try {
+    res = await fetch(`${ollamaUrl(config)}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    });
+  } catch (e) {
+    throw new Error(`Ollama indisponível (${e.cause?.code || e.name})`);
+  }
+  if (!res.ok) throw new Error(`Ollama respondeu ${res.status}: ${shorten(await res.text(), 200)}`);
+  const j = await res.json();
+  const raw = j.message?.content || '';
+  const data = schema ? tryJson(raw) : raw.trim();
+  if (!data) throw new Error('Ollama devolveu resposta vazia ou fora do formato');
+  return { provider: 'ollama', model: o.model, data, tokens: { input: j.prompt_eval_count || 0, cached: 0, output: j.eval_count || 0, costUsd: 0 } };
+}
+
 /**
  * @param {object} o
- * @param {string} o.feature   chave em config.features (meetings, briefing, busca, cobranca, slack...)
+ * @param {string} o.feature  chave em config.features (meetings, briefing, busca, cobranca, slack...)
  * @param {string} o.prompt
  * @param {object} [o.schema]  JSON Schema estrito; sem schema devolve texto
  * @param {object} o.config
@@ -139,8 +173,39 @@ async function askOnce(o) {
   if (choice.defer) throw new DeferError(choice.defer, choice.reason);
   const model = o.config.claude.models[f.model] || f.model || o.config.claude.models.equilibrado;
   const effort = f.effort || 'medium';
+  if (choice.provider === 'ollama') {
+    try {
+      return await ollamaOnce({ ...o, model, effort });
+    } catch (e) {
+      if (o.signal?.aborted) throw e;
+      // Ollama fora do ar ou resposta ruim: cai para o Claude, sem travar a função.
+      const fallback = { ...f, provider: 'claude' };
+      return askOnce({ ...o, config: { ...o.config, features: { ...o.config.features, [o.feature]: fallback } } });
+    }
+  }
   const run = choice.provider === 'codex' ? codexOnce : claudeOnce;
-  const result = await run({ ...o, model, effort });
+  // Privacidade: com a opção ligada, CPF, nomes, e-mails etc. viram marcadores antes de sair do PC
+  // e voltam ao normal na resposta. Quem detecta os nomes é o modelo local.
+  const priv = o.config.privacy || {};
+  let prompt = o.prompt;
+  let map = null;
+  if (priv.anonymizeCloud) {
+    const keep = [...(priv.keep || []), o.config.meetings?.selfName].filter(Boolean);
+    let a;
+    try {
+      a = await anonymize({ config: o.config, text: o.prompt, names: priv.names !== false, keep, signal: o.signal, strict: true });
+    } catch (e) {
+      if (o.signal?.aborted) throw e;
+      throw new Error(`A privacidade está ligada, mas ${e.message}. Nada foi enviado para a nuvem.`);
+    }
+    prompt = a.text;
+    map = a.map;
+  }
+  const result = await run({ ...o, prompt, model, effort });
+  if (map) {
+    result.data = deanonymize(result.data, map);
+    result.anonymized = Object.keys(map).length;
+  }
   o.usage.record(result.provider, result.model, result.tokens, o.feature);
   return result;
 }

@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const { loadMeeting, meetingKeyFromFile } = require('./transcript');
 const { shorten } = require('./providers/common');
 const { askOnce } = require('./ai');
+const { preSummarize } = require('./local-tools');
 
 // Schema "estrito" (tudo obrigatório, null quando não houver) para funcionar no Claude e no Codex.
 const nullableString = { type: ['string', 'null'] };
@@ -97,27 +98,42 @@ class MeetingsService {
   start() {
     this.stop();
     const dir = this.cfg.folder;
-    if (!this.cfg.enabled || !dir || !fs.existsSync(dir)) return;
-    try {
-      this.watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
-        if (name && name.toLowerCase().endsWith('.md')) this.#debounceScan();
-      });
-      this.watcher.on('error', () => {});
-    } catch {
-      /* sem watch: o scan periódico cobre */
-    }
-    // Rede de segurança: o watch do Windows às vezes perde eventos.
-    this.scanTimer = setInterval(() => this.scan(), 2 * 60 * 1000);
+    if (!this.cfg.enabled || !dir) return;
+    this.#watch();
+    // Rede de segurança: o watch do Windows às vezes perde eventos. Também liga o watch
+    // quando a pasta aparece depois (ex.: criada pela extensão após a Ohara abrir).
+    this.scanTimer = setInterval(() => {
+      if (!this.watcher) this.#watch();
+      this.scan();
+    }, 2 * 60 * 1000);
     this.backfillWaiting();
     // Retoma o que ficou pela metade (app fechado no meio, ou adiado pela cota).
     for (const m of Object.values(this.store.data.meetings)) {
-      if (m.status === 'na fila' || m.status === 'processando') this.#enqueue(m.key);
+      // start() também roda ao salvar os ajustes: não põe de novo na fila a reunião que está sendo analisada agora.
+      if ((m.status === 'na fila' || m.status === 'processando') && m.key !== this.current) this.#enqueue(m.key);
       if (m.status === 'adiada') {
         const wait = Math.max(5000, (m.retryAt || 0) - Date.now());
         this.timers.set(`retry:${m.key}`, setTimeout(() => this.reprocess(m.key), wait));
       }
     }
     this.scan();
+  }
+
+  #watch() {
+    const dir = this.cfg.folder;
+    if (!dir || !fs.existsSync(dir)) return;
+    try {
+      this.watcher = fs.watch(dir, { recursive: true }, (_ev, name) => {
+        if (name && name.toLowerCase().endsWith('.md')) this.#debounceScan();
+      });
+      // Pasta apagada ou desconectada: larga o watch; o scan periódico tenta de novo.
+      this.watcher.on('error', () => {
+        try { this.watcher?.close(); } catch {}
+        this.watcher = null;
+      });
+    } catch {
+      this.watcher = null; /* sem watch: o scan periódico cobre */
+    }
   }
 
   stop() {
@@ -153,13 +169,27 @@ class MeetingsService {
   }
 
   // Descobre reuniões novas ou que ganharam partes novas.
+  // Roda em timers e no watch: um erro aqui não pode escapar (derrubaria o processo principal).
   scan() {
+    try {
+      this.#scan();
+    } catch (err) {
+      console.error('Falha ao procurar reuniões:', err);
+    }
+  }
+
+  #scan() {
     if (!this.cfg.enabled) return;
     const groups = {};
     for (const f of this.#listFiles()) {
       const info = meetingKeyFromFile(f);
       if (!info) continue;
-      const st = fs.statSync(f);
+      let st;
+      try {
+        st = fs.statSync(f);
+      } catch {
+        continue; // apagado/renomeado entre a listagem e a leitura
+      }
       (groups[info.key] ||= { ...info, files: [] }).files.push({ path: f, mtime: st.mtimeMs, size: st.size });
     }
 
@@ -167,13 +197,15 @@ class MeetingsService {
     const stableMs = (this.cfg.stableSeconds ?? 30) * 1000;
     const cutoff = this.cfg.ignoreBefore ? new Date(`${this.cfg.ignoreBefore}T00:00:00`).getTime() : 0;
     let changed = false;
+    const novas = []; // reuniões que chegaram e esperam você pedir a análise
 
     for (const g of Object.values(groups)) {
       const m = this.store.data.meetings[g.key];
       const sig = g.files.map((f) => `${f.path}|${f.size}|${Math.round(f.mtime)}`).sort().join(';');
       if (m && m.signature === sig) continue;
       const newest = Math.max(...g.files.map((f) => f.mtime));
-      if (now - newest < stableMs) {
+      // Com espera zero não adia: o mtime do arquivo pode ficar uma fração de ms à frente do relógio.
+      if (stableMs > 0 && now - newest < stableMs) {
         // Ainda sendo gravado: tenta de novo depois.
         clearTimeout(this.timers.get(g.key));
         this.timers.set(g.key, setTimeout(() => this.scan(), stableMs - (now - newest) + 1000));
@@ -188,9 +220,19 @@ class MeetingsService {
       if (cutoff && newest < cutoff) {
         meeting.status = 'ignorada';
         meeting.reason = 'anterior à ativação do painel';
-      } else {
+      } else if (this.cfg.autoAnalyze) {
         meeting.status = 'na fila';
         this.#enqueue(g.key);
+      } else {
+        // Análise sob pedido: nada de IA até você pedir (não gasta token com reunião que não precisa).
+        // Lê só o arquivo (de graça) para mostrar duração, participantes e falas na lista.
+        meeting.status = 'aguardando';
+        meeting.reason = null;
+        try {
+          const data = loadMeeting(meeting.files, { selfName: this.cfg.selfName });
+          Object.assign(meeting, { start: data.start, end: data.end, durationMin: data.durationMin, participants: data.participants, falas: data.count });
+        } catch { /* a lista mostra sem os detalhes */ }
+        novas.push(meeting);
       }
       changed = true;
     }
@@ -198,8 +240,13 @@ class MeetingsService {
       this.store.save();
       this.emit('meetings:update', this.snapshot());
     }
+    for (const m of novas) {
+      const quem = (m.participants || []).filter((p) => !/\(eu\)$/.test(p)).slice(0, 3).join(', ');
+      this.notify('Reunião nova gravada', `${quem ? `Com ${quem}. ` : ''}Abra em Reuniões e peça a análise se precisar.`);
+    }
   }
 
+  /** Análise pedida por você (ou nova tentativa): vai para a fila mesmo abaixo do mínimo de falas. */
   reprocess(key) {
     const m = this.store.data.meetings[key];
     if (!m) return;
@@ -219,6 +266,7 @@ class MeetingsService {
     const key = this.queue.shift();
     if (!key) return;
     this.busy = true;
+    this.current = key;
     try {
       await this.#process(key);
     } catch (err) {
@@ -236,6 +284,7 @@ class MeetingsService {
       }
     } finally {
       this.busy = false;
+      this.current = null;
       this.store.save();
       this.emit('meetings:update', this.snapshot());
       this.#pump();
@@ -246,7 +295,9 @@ class MeetingsService {
     const config = this.getConfig();
     const m = this.store.data.meetings[key];
     const selfName = this.cfg.selfName;
-    const data = loadMeeting(m.files, { selfName });
+    const files = (m.files || []).filter((f) => fs.existsSync(f));
+    if (!files.length) throw new Error('Os arquivos da transcrição não estão mais na pasta.');
+    const data = loadMeeting(files, { selfName });
     Object.assign(m, {
       start: data.start,
       end: data.end,
@@ -267,7 +318,18 @@ class MeetingsService {
     m.status = 'processando';
     this.emit('meetings:update', this.snapshot());
 
-    const prompt = `${instructions({ ...data, isoDate: m.isoDate }, selfName)}\n${data.text}`;
+    // Reunião longa: o modelo local condensa antes, e só o resumo vai para o Claude (economiza cota).
+    let body = data.text;
+    delete m.preSummary;
+    const minChars = config.meetings?.preSummaryMinChars ?? 40000;
+    if (config.meetings?.localPreSummary !== false && config.ollama?.enabled !== false && config.features?.meetings?.provider !== 'ollama' && body.length > minChars) {
+      const short = await preSummarize({ config, text: body });
+      if (short) {
+        m.preSummary = { from: body.length, to: short.length };
+        body = short;
+      }
+    }
+    const prompt = `${instructions({ ...data, isoDate: m.isoDate }, selfName)}\n${body}`;
     const result = await askOnce({ feature: 'meetings', prompt, schema: SCHEMA, config, usage: this.usage });
     this.textCache.delete(key);
 
@@ -340,7 +402,7 @@ class MeetingsService {
         meetingKey: m.key,
         person: o.responsavel,
         text: o.descricao,
-        deadline: /^d{4}-d{2}-d{2}$/.test(o.prazo || '') ? o.prazo : null,
+        deadline: /^\d{4}-\d{2}-\d{2}$/.test(o.prazo || '') ? o.prazo : null,
         forMe: typeof o.para_mim === 'boolean' ? o.para_mim : undefined,
         status: 'open',
         touched: false,

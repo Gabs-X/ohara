@@ -67,7 +67,7 @@ function extractDrafts(answer) {
 // Qualquer outra coisa (pedido novo, ajuste no texto) → null e segue para a IA.
 // names: destinatários dos rascunhos, para aceitar "envia pra Tata".
 const SEND_WORDS = new Set(['confirmado', 'confirmada', 'confirmo', 'confirma', 'confirmar', 'confirme', 'envia', 'envie', 'enviar', 'manda', 'mande', 'mandar', 'dispara', 'dispare']);
-const YES_WORDS = new Set(['sim', 's', 'ok', 'okay', 'isso', 'beleza', 'blz', 'bora', 'certo', 'perfeito', 'otimo', 'claro', 'show', 'fechado']);
+const YES_WORDS = new Set(['sim', 's', 'ok', 'okay', 'isso', 'beleza', 'blz', 'bora', 'certo', 'perfeito', 'otimo', 'claro', 'show', 'fechado', 'exato', 'correto', 'positivo']);
 const CANCEL_WORDS = new Set(['cancela', 'cancele', 'cancelar', 'cancelado', 'cancelada', 'nao', 'esquece', 'esqueca', 'deixa', 'desiste']);
 const FILLER_WORDS = new Set([
   'pode', 'vai', 'ja', 'agora', 'envio', 'logo', 'entao', 'ai', 'la', 'mesmo', 'tudo', 'bom', 'ta', 'e', 'de', 'vez', 'ser',
@@ -134,11 +134,11 @@ function contactScore(query, title) {
 // Escolhe o contato pelo melhor score; se dois ficarem empatados no topo, é ambíguo (pergunta em vez de chutar).
 function pickContact(query, titles) {
   const q = norm(query);
-  const uniq = [...new Set(titles.filter(Boolean))];
+  const uniq = [...new Map(titles.filter(Boolean).map(t => [norm(t).replace(/[\u200b-\u200f\ufe0e\ufe0f]/g, ''), t])).values()];
   const ranked = uniq.map((t) => ({ t, s: contactScore(query, t) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
   if (ranked.length === 1 || (ranked.length > 1 && ranked[0].s - ranked[1].s >= 8)) return { name: ranked[0].t };
   if (ranked.length > 1) {
-    const top = ranked.filter((x) => x.s === ranked[0].s).map((x) => x.t);
+    const top = ranked.filter((x) => ranked[0].s - x.s < 8).map((x) => x.t);
     return { error: `Tem mais de um contato parecido com "${query}": ${top.slice(0, 4).join(', ')}. Qual deles?`, candidates: top };
   }
   const exact = uniq.filter((t) => norm(t) === q);

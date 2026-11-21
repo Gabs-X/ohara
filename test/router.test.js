@@ -1,7 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { route, classify } = require('../src/core/router');
-const { DEFAULT_CONFIG: config } = require('../src/core/config');
+const { DEFAULT_CONFIG } = require('../src/core/config');
+
+// Os testes cobrem o roteamento com o Codex ligado; o padrão (desligado) tem testes próprios no fim.
+const config = structuredClone(DEFAULT_CONFIG);
+config.codex.enabled = true;
 
 const r = (prompt, extra = {}) => route(prompt, { config, usage: {}, ...extra });
 
@@ -84,4 +88,72 @@ test('continuação curta segue a categoria da conversa', () => {
 test('pedido vago e mais longo vai para o Sonnet, não para o Haiku', () => {
   const d = r('queria que você desse uma olhada geral nas coisas que eu deixei pendentes por aqui hoje cedo');
   assert.equal(d.model, 'sonnet');
+});
+
+test('pedido que precisa do Chrome logado vai para o Claude, mesmo citando um projeto', () => {
+  const p = 'faca um post no linkedin tambem igual aos que fiz falando sobre a Ohara';
+  assert.equal(r(p, { projects }).provider, 'codex', 'sem a marcação de navegador, o projeto puxa para código');
+  const d = r(p, { projects, browser: true });
+  assert.equal(d.provider, 'claude');
+  assert.equal(d.model, 'sonnet');
+  assert.ok(d.reasons.some((x) => /Chrome logado/.test(x)));
+
+  // Cota do Claude alta, mas não bloqueada: o navegador ainda manda para o Claude.
+  assert.equal(r(p, { projects, browser: true, usage: { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0.1 } } }).provider, 'claude');
+  // Claude bloqueado: fica no Codex e explica.
+  const blocked = r(p, { projects, browser: true, usage: { claude: { status: 'rejected' }, codex: { fiveHour: 0.1 } } });
+  assert.equal(blocked.provider, 'codex');
+  assert.ok(blocked.reasons.some((x) => /sem navegador/.test(x)));
+  // Escolha manual continua valendo.
+  assert.equal(r(p, { projects, browser: true, override: 'codex:medium' }).provider, 'codex');
+});
+
+test('Codex desligado (o padrão): nada vai para ele, nem por categoria, cota, preferência ou escolha manual', () => {
+  const off = DEFAULT_CONFIG;
+  assert.equal(off.codex.enabled, false);
+  const ro = (prompt, extra = {}) => route(prompt, { config: off, usage: {}, ...extra });
+  const codigo = ro('corrige o bug na função de login do repositório');
+  assert.equal(codigo.provider, 'claude');
+  assert.ok(codigo.model);
+  assert.ok(codigo.reasons.some((x) => /Codex está desligado/.test(x)));
+  assert.equal(ro('escreva um email para o cliente', { usage: { claude: { fiveHour: 0.95 }, codex: { fiveHour: 0.1 } } }).provider, 'claude');
+  assert.equal(ro('escreva um email para o cliente', { learned: { escrita: 'codex:high' } }).provider, 'claude');
+  const manual = ro('qualquer coisa', { override: 'codex:high' });
+  assert.equal(manual.provider, 'claude');
+  assert.equal(manual.model, off.claude.models.profundo);
+});
+
+test('"ohara" como chamamento não vira o projeto da Ohara; "na ohara" vira', () => {
+  const { findProject, normalize } = require('../src/core/router');
+  const projects = [{ name: 'ohara', path: 'C:/p/ohara', self: true }, { name: 'taverna-bot', path: 'C:/p/taverna-bot' }];
+  assert.equal(findProject(normalize('ohara vc como uma IA Ollama tem como eu te ensinar a fazer coisas ou adicionar ?'), projects), null);
+  assert.equal(findProject(normalize('corrige o bug na ohara'), projects)?.name, 'ohara');
+  assert.equal(findProject(normalize('melhora o codigo da ohara'), projects)?.name, 'ohara');
+  assert.equal(findProject(normalize('taverna bot corrige o login'), projects)?.name, 'taverna-bot');
+});
+
+test('briefing: valida branch, cai para o título e acha o projeto pelo nome', () => {
+  const { parseBrief } = require('../src/core/brief');
+  const projects = [{ name: 'ohara', path: 'C:/p/ohara' }];
+  const ok = parseBrief('{"titulo":"Roteamento da Ohara","branch":"fix/Ohara Roteamento!","projeto":"Ohara","objetivo":"x"}', projects);
+  assert.equal(ok.branch, 'fix/ohara-roteamento');
+  assert.equal(ok.projectPath, 'C:/p/ohara');
+  const bad = parseBrief('lixo {"titulo":"Melhora a busca","branch":"abre-orca-ai","objetivo":"x"} fim', projects);
+  assert.equal(bad.branch, 'feat/melhora-a-busca');
+  assert.equal(bad.projeto, '');
+  assert.equal(parseBrief('{"titulo":"","objetivo":""}'), null);
+  assert.equal(parseBrief('não é json'), null);
+  const { validBranch } = require('../src/integrations/orca');
+  assert.equal(validBranch('fix/ohara-roteamento'), 'fix/ohara-roteamento');
+  assert.equal(validBranch('abre-orca-ai-eu-fala'), null);
+  assert.equal(validBranch('fix/../../x'), null);
+});
+
+test('briefing: a entrada leva projetos (marcando o da Ohara), conversa, resumo e a última mensagem', () => {
+  const { briefInput } = require('../src/core/brief');
+  const t = briefInput({ convo: 'Gabriel: a Ohara abriu o Orca à toa', text: 'abre o orca', projects: [{ name: 'ohara', self: true }, { name: 'ImLaw' }], hint: 'corrigir roteamento' });
+  assert.match(t, /Projetos conhecidos: ohara \(projeto da Ohara\), ImLaw/);
+  assert.match(t, /Conversa até aqui:\nGabriel: a Ohara abriu o Orca à toa/);
+  assert.match(t, /Resumo da Ohara-AI: corrigir roteamento/);
+  assert.match(t, /Última mensagem do Gabriel: abre o orca$/);
 });

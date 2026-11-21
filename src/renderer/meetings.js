@@ -17,6 +17,7 @@ const COLS = [
 ];
 const PRIO = { alta: 0, media: 1, baixa: 2 };
 const STATUS_LABEL = {
+  aguardando: '🕓 aguardando análise',
   'na fila': '⏳ na fila',
   processando: '⚙️ processando',
   pronta: '',
@@ -43,7 +44,27 @@ const openTasks = () => mt.data.tasks.filter((t) => t.status !== 'done');
 central.onMeetings((data) => {
   mt.data = data;
   renderMeetingBadge();
-  if (!document.getElementById('view-meetings').hidden) renderMeetings();
+  if (document.getElementById('view-meetings').hidden) return;
+  // Atualização em segundo plano enquanto a pessoa digita (nova demanda, cartão em edição):
+  // redesenhar apagaria o texto. Espera ela sair do campo.
+  if (isEditingIn('mt-body')) {
+    mt.pendingRender = true;
+    return;
+  }
+  renderMeetings();
+});
+function isEditingIn(id) {
+  const box = document.getElementById(id);
+  const a = document.activeElement;
+  return !!(box && a && box.contains(a) && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)));
+}
+document.addEventListener('focusout', () => {
+  // Depois que o foco saiu de fato (o próximo elemento já recebeu o foco).
+  setTimeout(() => {
+    if (!mt.pendingRender || isEditingIn('mt-body')) return;
+    mt.pendingRender = false;
+    if (!document.getElementById('view-meetings').hidden) renderMeetings();
+  }, 0);
 });
 
 function renderMeetingBadge() {
@@ -90,11 +111,14 @@ async function renderMeetings() {
   renderMeetingList();
   const status = document.getElementById('mt-status');
   const pending = mt.data.meetings.filter((m) => m.status === 'na fila' || m.status === 'processando').length;
+  const aguardando = mt.data.meetings.filter((m) => m.status === 'aguardando').length;
   status.textContent = !mt.data.enabled
     ? 'monitoramento desligado'
     : pending
       ? `processando ${pending} reuni${pending > 1 ? 'ões' : 'ão'}…`
-      : `monitorando ${mt.data.folder}`;
+      : aguardando
+        ? `${aguardando} reuni${aguardando > 1 ? 'ões aguardando' : 'ão aguardando'} análise (só quando você pedir)`
+        : `monitorando ${mt.data.folder}`;
 
   const v = mt.view;
   setSeg(v === 'people' || v.startsWith('person:') ? 'people' : v === 'board' ? 'board' : '');
@@ -205,7 +229,7 @@ function cardHtml(t) {
   const next = t.status === 'todo' ? 'doing' : t.status === 'doing' ? 'done' : 'todo';
   const nextLabel = { doing: 'Iniciar demanda', done: 'Marcar como concluída', todo: 'Reabrir demanda' }[next];
   const origin = m
-    ? `<button class="origin" data-meeting="${m.key}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>`
+    ? `<button class="origin" data-meeting="${esc(m.key)}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>`
     : t.source === 'slack' && t.link
       ? `<button class="origin" data-link="${esc(t.link)}">↳ Slack</button>`
       : '';
@@ -233,7 +257,7 @@ function waitingHtml(w) {
   return `<div class="card waiting${w.forMe === false ? ' dim' : ''}" data-wid="${w.id}">
     <div class="card-text"><b>${esc(w.person)}</b>: ${esc(w.text)}</div>
     <div class="card-meta">${dl ? `<span class="due ${dl.cls}">📅 ${esc(dl.text)}</span>` : '<span>sem prazo</span>'}${w.lastNudgedAt ? `<span>cobrado ${relTime(w.lastNudgedAt)}</span>` : ''}</div>
-    ${m ? `<button class="origin" data-meeting="${m.key}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>` : ''}
+    ${m ? `<button class="origin" data-meeting="${esc(m.key)}">↳ ${esc(m.title || m.code)} · ${brDate(m.isoDate)}</button>` : ''}
     <div class="card-actions">
       <button data-wact="nudge" title="Preparar mensagem para revisar">Preparar cobrança</button>
       <button data-wact="done" class="task-primary">Marcar como recebido</button>
@@ -442,10 +466,11 @@ function renderMeetingDetail(m) {
       <button class="btn small-btn" id="d-save" title="Salvar .md na sua pasta do Claude">Salvar .md</button>
       <button class="btn small-btn" id="d-mail" title="Abrir e-mail com o resumo">Enviar resumo por e-mail</button>` : ''}
       <button class="btn small-btn" id="d-files">Abrir transcrição</button>
-      <button class="btn small-btn" id="d-reprocess">${m.status === 'ignorada' ? 'Processar mesmo assim' : 'Analisar novamente'}</button>
+      <button class="btn small-btn${m.status === 'aguardando' ? ' primary' : ''}" id="d-reprocess">${m.status === 'aguardando' ? '🔍 Analisar com o Claude' : m.status === 'ignorada' ? 'Processar mesmo assim' : 'Analisar novamente'}</button>
     </div>
     ${m.participants?.length ? `<p class="muted small">Participantes: ${esc(m.participants.join(', '))}</p>` : ''}
-    ${m.status !== 'pronta' && m.status !== 'sem demandas' ? `<p class="notice">Status: ${esc(m.status)}${m.reason ? ` — ${esc(m.reason)}` : ''}${m.retryAt ? ` · nova tentativa ${new Date(m.retryAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}
+    ${m.status === 'aguardando' ? `<p class="notice">Esta reunião ainda não foi analisada. A análise usa o Claude e gasta cota, então peça só se ela importar${m.falas ? ` (${m.falas} falas${m.durationMin ? `, ${m.durationMin} min` : ''})` : ''}.</p>` : ''}
+    ${m.status !== 'pronta' && m.status !== 'sem demandas' && m.status !== 'aguardando' ? `<p class="notice">Status: ${esc(m.status)}${m.reason ? ` — ${esc(m.reason)}` : ''}${m.retryAt ? ` · nova tentativa ${new Date(m.retryAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''}</p>` : ''}
     ${s ? `
       <h2>Resumo</h2><p>${esc(s.resumo)}</p>
       <div class="grid2">

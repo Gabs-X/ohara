@@ -123,7 +123,10 @@ function matchStartApp(name, apps) {
   const q = strip(name);
   const candidates = apps.filter((a) => !/uninstall|desinstal/i.test(a.Name));
   const by = (fn) => candidates.filter((a) => fn(strip(a.Name))).sort((a, b) => a.Name.length - b.Name.length)[0];
-  return by((n) => n === q) || by((n) => n.startsWith(q)) || by((n) => n.split(/[\s.-]+/).includes(q)) || by((n) => n.includes(q)) || null;
+  if (!q) return null;
+  // Nome muito curto ("ia", "tv") casaria com qualquer app pelo meio do nome: só aceita se for igual ou palavra inteira.
+  const loose = q.length >= 3;
+  return by((n) => n === q) || (loose && by((n) => n.startsWith(q))) || by((n) => n.split(/[\s.-]+/).includes(q)) || (loose && by((n) => n.includes(q))) || null;
 }
 
 function launch(file, args = []) {

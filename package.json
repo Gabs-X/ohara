@@ -1,6 +1,6 @@
 {
   "name": "ohara",
-  "version": "0.6.5",
+  "version": "0.6.33",
   "description": "Ohara: assistente de IA para o Windows que orquestra Claude Code e Codex, com roteamento de modelo e gestão de cota.",
   "main": "src/main.js",
   "private": true,
@@ -8,7 +8,11 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test test/*.test.js",
-    "dist": "electron-builder --win nsis portable"
+    "dist": "electron-builder --win nsis portable --publish never && node build/finish-dist.js",
+    "release": "npm run dist && node build/release.js",
+    "start:guia": "electron src/guia/main.js",
+    "dev:guia": "electron src/guia/main.js --dev",
+    "dist:guia": "electron-builder --config build/guia.builder.json --win nsis portable --publish never"
   },
   "build": {
     "appId": "com.gabsx.central-ia",
@@ -36,7 +40,15 @@
     "portable": {
       "artifactName": "Ohara-Portatil-${version}.${ext}"
     },
-    "afterPack": "build/after-pack.js"
+    "afterPack": "build/after-pack.js",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Gabs-X",
+        "repo": "ohara",
+        "releaseType": "release"
+      }
+    ]
   },
   "author": "Gabs-X",
   "license": "UNLICENSED",
@@ -46,6 +58,8 @@
     "rcedit": "^4.0.1"
   },
   "dependencies": {
-    "msedge-tts": "2.1.1"
+    "electron-updater": "^6.8.11",
+    "msedge-tts": "2.1.1",
+    "pdfjs-dist": "4.10.38"
   }
 }

@@ -1,4 +1,4 @@
-/* global central, renderMarkdown, Voice */
+/* global central, renderMarkdown */
 // Janela rápida: pergunta, área de transferência ou voz, com resposta na hora.
 
 const q = {
@@ -10,9 +10,8 @@ const q = {
   tools: document.getElementById('q-tools'),
   text: document.getElementById('q-text'),
   meta: document.getElementById('q-meta'),
-  mic: document.getElementById('q-mic'),
 };
-const st = { chatId: null, buf: '', tools: [], clipboard: '', recording: null, busy: false, config: null };
+const st = { chatId: null, buf: '', tools: [], clipboard: '', busy: false, config: null };
 
 const escq = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -34,26 +33,12 @@ function reset() {
 
 central.onQuickOpen(async (p) => {
   st.config = await central.getConfig();
-  // Conversa por voz: o processo principal envia o pedido e fala a resposta; aqui só acompanha.
-  if (p.mode === 'voiceTurn') {
-    reset();
-    st.voiceTurn = true;
-    st.chatId = p.chatId;
-    q.input.value = p.text || '';
-    q.input.placeholder = '🎙️ Estou ouvindo… pode falar';
-    q.answer.hidden = false;
-    document.getElementById('q-end-voice').hidden = false;
-    if (p.text) {
-      q.answer.hidden = false;
-      q.text.innerHTML = '<span class="typing"><i></i><i></i><i></i></span>';
-    }
-    return fit();
-  }
-  st.voiceTurn = false;
-  document.getElementById('q-end-voice').hidden = true;
-  if (st.busy && p.mode === 'ask' && !p.text) {
+  if (p.mode === 'voiceTurn' || p.mode === 'voice') return;
+  if (st.busy) {
+    // Mantém a resposta em andamento: reset() aqui apagava a resposta e descartava o resto dela.
+    if (p.mode !== 'ask' || p.text) q.meta.textContent = 'Espere a resposta atual terminar para fazer outro pedido.';
     q.input.focus();
-    return fit(); // mantém a resposta em andamento
+    return fit();
   }
   reset();
   q.input.value = '';
@@ -74,7 +59,7 @@ central.onQuickOpen(async (p) => {
   q.input.focus();
   fit();
   if (p.autoSend && p.text) send(p.text);
-  if (p.mode === 'voice') toggleVoice();
+
 });
 
 async function send(text) {
@@ -90,11 +75,18 @@ async function send(text) {
   st.buf = '';
   st.tools = [];
   fit();
-  const chat = await central.createChat(st.config?.defaultCwd, `⚡ ${text.slice(0, 44)}`);
-  st.chatId = chat.id;
-  const res = await central.send(chat.id, { text: full, override: 'auto', source: 'quick' });
-  st.busy = false;
-  central.quickPin(false);
+  let res;
+  try {
+    const chat = await central.createChat(st.config?.defaultCwd, `⚡ ${text.slice(0, 44)}`);
+    st.chatId = chat.id;
+    res = await central.send(chat.id, { text: full, override: 'auto', source: 'quick' });
+  } catch (err) {
+    res = { error: err.message || String(err) };
+  } finally {
+    // Sem isto, um erro deixava a janela rápida "ocupada" e fixa na tela até reiniciar o app.
+    st.busy = false;
+    central.quickPin(false);
+  }
   if (res?.error && !res.role) {
     q.text.innerHTML = `<p class="err">⚠️ ${escq(res.error)}</p>`;
     fit();
@@ -104,7 +96,7 @@ async function send(text) {
 central.onRoute(({ chatId, route }) => {
   if (chatId !== st.chatId) return;
   q.route.hidden = false;
-  q.route.innerHTML = `→ <b class="${route.provider}">${route.provider === 'codex' ? 'Codex' : route.provider === 'local' ? 'Ohara' : 'Claude'} ${escq(route.model)}</b> · ${escq(route.label)}`;
+  q.route.innerHTML = `→ <b class="${route.provider}">${{ codex: 'Codex', local: 'Ohara', ollama: 'Ohara-AI', orca: 'Orca' }[route.provider] || 'Claude'} ${escq(route.model)}</b> · ${escq(route.label)}`;
   fit();
 });
 
@@ -132,58 +124,11 @@ central.onDone(({ chatId, message }) => {
   const t = message.tokens;
   q.meta.textContent = t ? `${message.model} · ${Math.round(((t.input || 0) + (t.cached || 0) + (t.output || 0)) / 100) / 10}k tokens` : message.model || '';
   q.tools.innerHTML = '';
-  if (st.config?.voice?.speakReplies && st.buf && !st.voiceTurn) central.speak(st.buf); // na conversa por voz quem fala é o processo principal
+  if (st.config?.voice?.speakReplies && st.buf) central.speak(st.buf); // na conversa por voz quem fala é o processo principal
   fit();
 });
 
 // ---------- Voz ----------
-async function toggleVoice() {
-  if (st.recording) {
-    st.recording.stop();
-    return;
-  }
-  const ws = await central.whisperStatus();
-  if (!ws.installed) {
-    q.answer.hidden = false;
-    q.text.innerHTML = '<p>Para falar com a Ohara, instale o Whisper em <b>Ajustes → Voz</b> (uma vez só).</p>';
-    fit();
-    return;
-  }
-  try {
-    q.mic.classList.add('rec');
-    q.input.value = '';
-    q.input.placeholder = 'Ouvindo… (fale e faça uma pausa)';
-    q.route.hidden = false;
-    q.route.innerHTML = '🔴 gravando <span class="level"><i id="lv"></i></span>';
-    fit();
-    st.recording = await Voice.record({ onLevel: (l) => { const lv = document.getElementById('lv'); if (lv) lv.style.width = `${Math.round(l * 100)}%`; } });
-    const bytes = await st.recording.done;
-    st.recording = null;
-    q.mic.classList.remove('rec');
-    if (!bytes) {
-      q.route.textContent = 'Não ouvi nada.';
-      q.input.placeholder = 'Pergunte qualquer coisa…';
-      return fit();
-    }
-    q.route.textContent = '⏳ transcrevendo…';
-    const text = await Voice.transcribe(bytes);
-    q.input.value = text;
-    q.route.hidden = true;
-    q.input.placeholder = 'Pergunte qualquer coisa…';
-    fit();
-    if (text && st.config?.voice?.autoSendVoice) send(text);
-  } catch (err) {
-    st.recording = null;
-    q.mic.classList.remove('rec');
-    q.route.hidden = false;
-    q.route.textContent = `Voz: ${err.message}`;
-    fit();
-  }
-}
-
-central.onQuickVoiceToggle(toggleVoice);
-q.mic.addEventListener('click', toggleVoice);
-
 // ---------- Teclado e botões ----------
 q.input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -193,7 +138,6 @@ q.input.addEventListener('keydown', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (st.recording) st.recording.cancel();
     central.quickHide();
   }
 });
@@ -206,13 +150,3 @@ document.querySelectorAll('.q-chips button').forEach((b) =>
 document.getElementById('q-copy').addEventListener('click', () => central.copy(st.buf));
 document.getElementById('q-open').addEventListener('click', () => st.chatId && central.quickOpenInMain(st.chatId));
 
-// Encerra a conversa por voz: ela para de tratar o que ouve como pedido (precisa de "Ohara" de novo).
-document.getElementById('q-end-voice').addEventListener('click', async () => {
-  await central.voiceEnd();
-  document.getElementById('q-end-voice').hidden = true;
-  q.input.placeholder = 'Conversa por voz encerrada. Diga "Ohara" para chamar de novo.';
-  fit();
-});
-central.onVoiceSession?.(({ active }) => {
-  if (!active) document.getElementById('q-end-voice').hidden = true;
-});

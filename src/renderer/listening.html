@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>Ohara · Escuta</title>
+  <link rel="stylesheet" href="listening.css">
+</head>
+<body>
+  <div class="caption">Ohara · microfone <button id="hide" title="Ocultar indicador (reative em Ajustes → Voz)" aria-label="Ocultar indicador">×</button></div>
+  <div class="controls">
+    <span id="dot" data-mode="off" aria-hidden="true"></span>
+    <span id="status" role="status" aria-live="polite">Verificando microfone…</span>
+    <button id="toggle" disabled>Ligar</button>
+  </div>
+  <script src="listening.js"></script>
+</body>
+</html>

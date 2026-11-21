@@ -154,6 +154,60 @@ Isso gera, na pasta `dist\`:
 O ícone é aplicado pelo `build/after-pack.js` (rcedit), porque a assinatura do electron-builder exige permissão de link simbólico no Windows.
 Os executáveis não são assinados, então o SmartScreen pode avisar na primeira execução: clique em "Mais informações" e depois em "Executar assim mesmo".
 
+## Ohara Guia (edição para quem não é desenvolvedor)
+
+Uma edição separada, no mesmo repositório, para dar a outra pessoa: usa o mesmo núcleo (IAs, roteador, cota), mas sem as integrações pessoais (reuniões, WhatsApp, Slack, Orca, entrevista, voz) e sem caminhos deste PC. Tem outro nome, outra pasta de dados (`%APPDATA%\Ohara Guia`) e pode ser instalada ao lado da Ohara.
+
+```powershell
+npm run start:guia   # abre a Ohara Guia a partir do código
+npm run dist:guia    # gera dist-guia\Ohara-Guia-Setup-<versão>.exe e Ohara-Guia-Portatil-<versão>.exe
+```
+
+| Recurso | Como funciona |
+|---|---|
+| Várias IAs | Claude, Codex, Gemini (Gemini CLI, com camada grátis) e IA local (Ollama). Cada uma descrita em `src/core/providers/registry.js`; para acrescentar outra, basta um adaptador e uma entrada no registro. |
+| Orquestração | `src/core/multi-router.js` classifica o pedido, vê o que ele exige (nível do modelo, ferramentas, imagem) e dá uma nota a cada IA pronta juntando custo, qualidade e cota já gasta. Modos: economia (padrão), equilíbrio e qualidade. Se a escolhida falhar por cota ou login, a próxima assume e o contexto vai junto. |
+| Cota unificada | Claude e Codex informam a cota real; a do Gemini é estimada pelos pedidos do dia. A tela "Uso e economia" mostra quanto o roteamento economizou contra o Claude Sonnet (preço de API equivalente, só para comparar). |
+| Planejador | A ideia vira um plano (objetivo, etapas, riscos, perguntas) feito no modelo forte. Cada etapa roda depois no modelo mais barato que resolve aquele tipo de etapa. Dá para pedir ajustes mantendo as etapas feitas. |
+| Rede de segurança | Antes e depois de cada pedido num projeto, uma foto da pasta (`src/core/checkpoints.js`, num Git separado em `%APPDATA%\Ohara Guia\pontos`, sem tocar no projeto). "Desfazer" volta só os arquivos que a IA mexeu; "Refazer" traz de volta. As IAs são instruídas a não mexer fora da pasta e a pedir confirmação antes de ações difíceis de desfazer. |
+| Explicações | O fim de cada tarefa traz "O que eu fiz" e "Como conferir", sem jargão. "Por quê?" em cada resposta mostra o motivo da escolha da IA. |
+| Abrir meu projeto | Descobre como rodar a pasta (site estático no navegador; Node ou Python num terminal). |
+| Ferramentas locais | A mesma aba 🧰 da Ohara (documentos, extrair dados, triagem, documento por foto, privacidade e diagnóstico de erro), sem a aba de commit. |
+| Privacidade na conversa | Ligada em Ferramentas → Privacidade: antes de um pedido ir para Claude, Codex ou Gemini, CPF, CNPJ, nomes, e-mails etc. viram marcadores e voltam na resposta. Se a proteção falhar, nada é enviado. Cada pedido abre uma sessão nova com o contexto (os marcadores são renumerados). Os arquivos que a IA abre no projeto não passam por isso. |
+| Primeiros passos | Checagem de saúde: internet, Node, Git e cada IA (instalada? logada?), com botões "Instalar" e "Fazer login" que abrem o terminal com o comando certo. Repete a cada 10 minutos. |
+
+Atualização automática: os releases da Guia vão para `Gabs-X/ohara-guia` (configurado em `build/guia.builder.json`); o repositório precisa ser público para o app de outra pessoa conseguir baixar.
+
+## Ferramentas locais
+
+Aba **🧰 Ferramentas**. Tudo roda no modelo local (Ollama): não gasta cota e o dado não sai do PC. Diferente das funções automáticas, aqui não existe reserva no Claude: se o Ollama estiver fechado, a ferramenta avisa e para.
+
+| Ferramenta | O que faz | Modelo |
+|---|---|---|
+| Documentos | Indexa as pastas escolhidas (PDF com texto, .docx, txt, md, html) e responde perguntas por significado, citando o arquivo de cada trecho. Só relê o que mudou. | `bge-m3` + modelo de texto |
+| Extrair dados | Partes, CPF/CNPJ, valores, prazos, nº do processo e obrigações de contratos, acordos e petições. | modelo de texto |
+| Triagem | Classifica e-mails, mensagens e intimações por urgência, área, cliente e prazo (separe cada uma com `---`). | modelo de texto |
+| Documento por foto | Lê RG, CNH, comprovante ou página escaneada e devolve os campos. | `qwen2.5vl:7b` |
+| Privacidade | Liga a anonimização do que vai para o Claude/Codex nas funções automáticas: CPF, CNPJ, processo, OAB, e-mail, telefone, CEP, nomes e endereços viram marcadores e voltam na resposta. Também testa um texto. | modelo de texto |
+| Commit e PR | Escreve a mensagem de commit e a descrição do PR a partir do diff, no estilo dos commits anteriores. Não faz commit. | modelo de texto |
+| Diagnóstico de erro | Primeira olhada num log: causa provável, passos e se vale chamar o Claude (com botão que já leva o erro para o chat). | modelo de texto |
+
+Além disso, reunião com transcrição acima de `meetings.preSummaryMinChars` (40 mil caracteres) é condensada no modelo local antes de ir para o Claude (`meetings.localPreSummary`, ligado por padrão). Se o Ollama falhar, vai a transcrição inteira.
+
+Modelos a baixar uma vez: `ollama pull bge-m3` e `ollama pull qwen2.5vl:7b` (a tela avisa o que falta). Configuração em `ollama.embedModel`, `ollama.visionModel`, `documents.folders` e `privacy`. O índice fica em `%APPDATA%\Ohara\documentos-indice.json`.
+
+## Modo entrevista
+
+Para entrevistas em inglês no Teams (ou qualquer app de chamada). Abra com **Ctrl+Alt+E** ou pela bandeja → **Modo entrevista** e clique em **Começar a ouvir**.
+
+1. A Ohara capta o **áudio que sai do PC** (loopback: a voz de quem entrevista) e o seu **microfone**. Só a voz de quem entrevista gera respostas; a sua vai para a transcrição salva e ajuda o Claude a entender perguntas de continuação. Com fone de ouvido as vozes ficam bem separadas; no alto-falante, o eco da outra pessoa no microfone é filtrado. Para não captar o microfone: `interview.captureMic: false`.
+2. Cada fala é cortada pelo volume e transcrita em inglês pelo Whisper local (modelo `small`, uns 3 s por trecho). Falas longas são transcritas aos pedaços enquanto a pessoa ainda fala.
+3. Quando a pessoa faz uma pausa, a fala vai para o Claude (`haiku`, sem ferramentas nem MCP, para responder rápido) junto com o `contexto.md` e as falas anteriores. Se for pergunta, aparece um cartão feito para ler de relance: a pergunta traduzida em uma linha, **uma frase grande em inglês, de até 8 palavras, pronta para falar**, e 2 ou 3 palavras-chave de apoio (empresas, projetos, tecnologias). Se não for (apresentação, falas sobre a empresa), nada aparece. Se quem entrevista repetir a pergunta, não aparece cartão novo: o cartão de antes volta para o topo com a marca **de novo**.
+4. **Responder agora** analisa o que já foi dito sem esperar a pausa. Se a transcrição falhar, dá para digitar a pergunta no campo de baixo.
+
+O **Contexto** abre `%APPDATA%\Ohara\entrevista\contexto.md`: cole ali o currículo e a descrição da vaga. Ele é mandado inteiro a cada pergunta, e a IA não inventa nada que não esteja nele.
+A transcrição (com horário, **Entrevistador** e **Eu**) e as respostas sugeridas são salvas em `<outputDir>\Entrevistas\entrevista-<data>.md`; o botão **Transcrição** abre o arquivo. Ajustes em `interview` no `config.json` (modelo do Whisper, modelo do Claude, tamanho mínimo da fala).
+
 ## Reuniões e painel de demandas
 
 A central observa `C:\Users\gabri\Downloads\Gutenberg`, onde o bot salva um transcript `.md` no fim de cada call. Para cada reunião nova:
@@ -194,7 +248,7 @@ Para ajustar (em `config.json`): `meetings.folder`, `meetings.model`, `meetings.
 | `Ctrl+Espaço` | Mostra ou esconde a Central. |
 | `Alt+Espaço` | Janela rápida: pergunta e resposta por cima de tudo. |
 | `Ctrl+Alt+Espaço` | Janela rápida com o que você copiou: Explicar, Traduzir, Corrigir, Resumir, Diagnosticar erro. |
-| `Ctrl+Alt+C` | Corrige o texto selecionado em qualquer app (ortografia, acentos e pontuação, mantendo o seu jeito de escrever) e cola no lugar. Se você trocar de janela enquanto ela corrige, o texto corrigido fica copiado para colar com `Ctrl+V`. |
+| `Ctrl+Shift+F8` | Corrige o texto selecionado em qualquer app (ortografia, acentos, pontuação e abreviações como “vc” → “você” e “tbm” → “também”, mantendo o seu jeito de escrever) e cola no lugar. Preserva siglas e termos técnicos. Se você trocar de janela enquanto ela corrige, o texto corrigido fica copiado para colar com `Ctrl+V`. |
 | `Ctrl+Alt+V` | Fala: grava, transcreve com o Whisper e envia. |
 
 ### Funções automáticas e orçamento

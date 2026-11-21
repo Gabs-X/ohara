@@ -81,7 +81,15 @@ function expand(events, from, to) {
     const byDay = r.BYDAY ? r.BYDAY.split(',').map((d) => DAYS[d.slice(-2)]) : null;
     let n = 0;
     const startDay = new Date(e.start);
-    for (let i = 0; i < 400 && n < count; i++) {
+    // Sem COUNT, não precisa contar desde o começo: pula direto para perto de "from", alinhado ao ciclo
+    // (senão uma reunião semanal criada há mais de 400 dias sumia da agenda).
+    let first = 0;
+    if (count === Infinity && from > startDay) {
+      const period = r.FREQ === 'WEEKLY' ? 7 * interval : r.FREQ === 'DAILY' ? interval : 1;
+      const behind = Math.floor((from - startDay) / 864e5) - 7;
+      if (behind > 0) first = behind - (behind % period);
+    }
+    for (let i = first; i < first + 400 && n < count; i++) {
       const day = new Date(startDay.getFullYear(), startDay.getMonth(), startDay.getDate() + i, startDay.getHours(), startDay.getMinutes(), startDay.getSeconds());
       if (until && day > until) break;
       if (day > to) break;
@@ -123,14 +131,21 @@ class Calendar {
     return this.getConfig().integrations.calendarIcsUrl;
   }
 
-  async refresh(force = false) {
+  // Uma busca por vez, com tempo limite: sem isso, uma rede travada deixava a tela de Ajustes
+  // carregando para sempre e empilhava uma busca nova a cada minuto.
+  refresh(force = false) {
     if (!this.url) {
       this.events = [];
-      return;
+      return Promise.resolve();
     }
-    if (!force && Date.now() - this.fetchedAt < 15 * 60_000) return;
+    if (!force && Date.now() - this.fetchedAt < 15 * 60_000) return Promise.resolve();
+    if (!this.inflight) this.inflight = this.#fetch().finally(() => { this.inflight = null; });
+    return this.inflight;
+  }
+
+  async #fetch() {
     try {
-      const res = await fetch(this.url, { headers: { 'User-Agent': 'ohara' } });
+      const res = await fetch(this.url, { headers: { 'User-Agent': 'ohara' }, signal: AbortSignal.timeout(20_000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       const from = new Date();
@@ -140,7 +155,7 @@ class Calendar {
       this.fetchedAt = Date.now();
       this.error = null;
     } catch (err) {
-      this.error = err.message;
+      this.error = err.name === 'TimeoutError' ? 'a agenda não respondeu a tempo' : err.message;
     }
   }
 

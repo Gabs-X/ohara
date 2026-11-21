@@ -1,13 +1,21 @@
 // Orquestrador: recebe um pedido, escolhe a rota, chama o provedor e
 // mantém o contexto quando a conversa alterna entre Claude e Codex.
 const crypto = require('crypto');
-const { route, classify, learnPreferences } = require('./router');
-const { runClaude } = require('./providers/claude');
-const { runCodex } = require('./providers/codex');
+const fs = require('fs');
+const { route, classify, findProject, learnPreferences, normalize } = require('./router');
+const os = require('os');
+const { chatLocal, decideLocal, briefLocal } = require('./local-chat');
+const { BRIEF_PROMPT, parseBrief, briefInput } = require('./brief');
+const { runClaude, buildChatArgs } = require('./providers/claude');
+const { anonymize, deanonymize } = require('./local-tools');
+const { sendToOrca } = require('../integrations/orca');
 const path = require('path');
 const { listRepos } = require('./system');
+const { asksPcInfo } = require('./pc-tools');
+const { asksPcAction, defaultCtx, runPending, replyToPending, toPending, askLine } = require('./pc-actions');
 const { wantsWhatsApp, extractDrafts, parseSendReply } = require('../integrations/whatsapp');
 const { parseQuickAction, runQuickAction } = require('./quick-actions');
+const { wantsBrowser, needsBrowser, chromeNote, chromeIssueNote, findChrome, CODEX_BROWSER_NOTE } = require('../integrations/chrome');
 
 const WHATSAPP_NOTE = [
   'O pedido envolve WhatsApp. Não tente enviar nada você mesmo: a Ohara cuida do envio.',
@@ -29,7 +37,7 @@ const CONTACTS_NOTE = (confirm) => [
   '[[/whatsapp]]',
   'Não peça o nome completo: a Ohara procura o contato pelo nome mesmo parcial, apelido ou mal transcrito, e só pergunta se houver mais de um parecido.',
   confirm
-    ? 'A Ohara mostra a mensagem e envia quando ele confirmar ("confirmado", "envia" ou o botão Enviar).'
+    ? 'A Ohara procura o contato, mostra a ele o nome exato que achou e só envia quando ele confirmar ("confirmado", "sim" ou o botão Enviar). Não diga que já enviou. Se ele corrigir o contato, repita o bloco com o nome novo.'
     : 'A Ohara ENVIA NA HORA: não peça confirmação, não diga que precisa de botão e não pergunte "tem certeza". Ele já pediu.',
   'Se ele disser "envia a mensagem" sobre uma mensagem que você já preparou nesta conversa, repita o bloco com o mesmo texto.',
 ].join('\n');
@@ -44,11 +52,36 @@ const IGNORE_RE = /\[\[ignorar\]\]/i;
 // Na conversa por voz, o que não exige raciocínio vai para o modelo rápido (resposta em menos tempo).
 const VOICE_FAST = new Set(['rapida', 'geral', 'escrita', 'sistema']);
 
+// O Claude chamado pela Ohara-AI dentro do chat: responde aqui, só com acesso à internet.
+const CLAUDE_CHAT_NOTE = [
+  'Você é a Ohara, assistente pessoal do Gabriel. A Ohara-AI (o modelo local dela) chamou você para responder este pedido aqui no chat porque ele precisa de mais do que o modelo local dá conta.',
+  'Responda sempre em português do Brasil, de forma direta e assertiva, com bom humor leve quando couber (no máximo uma brincadeira, nunca quando ele estiver com problema sério). Não faça referências a One Piece nem a animes.',
+  'Você só tem pesquisa e leitura de páginas na internet: use quando precisar de informação atual e cite de onde veio. Não tem acesso a arquivos, comandos nem ao PC dele.',
+  'Se o pedido for sobre um projeto, código ou arquivos, não tente fazer: diga em uma frase que isso fica com o Claude no Orca e que basta ele pedir "manda pro Claude".',
+  'Se não souber ou não tiver certeza, diga isso em vez de inventar.',
+].join('\n');
+
+// Uso do Claude (0 a 1) na janela mais cheia.
+const claudeUtil = (l) => (l ? Math.max(l.fiveHour ?? 0, l.weekly ?? 0) : 0);
+
 const PARALLEL_NOTE =
   'Outra tarefa desta mesma conversa ainda está rodando em paralelo. Faça só o que este pedido pede e evite mexer nos mesmos arquivos que a outra tarefa sem necessidade.';
 
+// Categorias que exigem ferramentas: só vão para o Claude (no Orca) quando o pedido é uma ação.
+const AGENT_CATEGORIES = new Set(['codigo', 'codigo_complexo', 'sistema', 'pesquisa']);
+const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[aei]\w*|abert\w*|encaminh\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
+// Cumprimento ou agradecimento curto: não precisa da Ohara-AI decidir quem atende (economiza uma chamada ao modelo).
+const SMALL_TALK_RE = /^ (oi|ola|opa|e ai|eai|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|vlw|tchau|ate mais|tudo bem|tudo bom|como vai|kk+|ha(ha)+|rs+)\b[^]{0,25}$/;
+const isSmallTalk = (plain) => SMALL_TALK_RE.test(plain) && !ACTION_RE.test(plain) && !isHandoff(plain);
+const QUESTION_RE = /\b(tem como|da pra|da para|consegue|conseguiria|voce sabe|vc sabe|sabe fazer|sabe como|e possivel|seria possivel|como (eu )?(faco|posso)|como funciona)\b/;
+// Pedido explícito para o Claude/Orca ("encaminhe ao Claude", "abre o Orca", "era pra ter aberto o Orca"):
+// vai sem depender do modelo local acertar.
+const HANDOFF_TARGET_RE = /\b(claude|orca)\b/;
+const HANDOFF_VERB_RE = /\b(encaminh\w*|mand\w*|pass\w*|envi\w*|cham\w*|abr\w*|abert\w*|usa\w*|use|usar|segu\w*|faz\w*|fac\w*|leva\w*|joga\w*|deleg\w*|pede|pedir|resolv\w*|continu\w*)\b/;
+const isHandoff = (plain) => HANDOFF_TARGET_RE.test(plain) && HANDOFF_VERB_RE.test(plain);
 const MAX_CONTEXT_CHARS = 9000;
 const DRAFT_STATUS = { pending: 'aguardando confirmação', sending: 'enviando', sent: 'enviada', error: 'falhou', cancelled: 'cancelada' };
+const ACTION_STATUS = { pending: 'aguardando confirmação', running: 'fazendo', done: 'feita', error: 'falhou', cancelled: 'cancelada', expired: 'expirou' };
 const DRAFT_TTL = 30 * 60_000; // "confirmado" vale para rascunhos de até 30 min atrás
 const MAX_MSG_CHARS = 1800;
 
@@ -91,17 +124,48 @@ function selfImprovePrompt(desc, request) {
   ].filter(Boolean).join('\n');
 }
 
+// Qual conta do Claude: "imlaw" (escritório) ou "pessoal". No pedido só vale se citar o Claude/conta;
+// na resposta à pergunta da Ohara (loose) basta citar a conta.
+function parseAccount(text, { loose = false } = {}) {
+  const t = normalize(text);
+  if (loose && t.split(/\s+/).length > 12) return null;
+  const im = loose ? /\b(imlaw|im law|escritorio|trabalho)\b/ : /\b(claude|conta|login)\s+(?:d[oa]s?\s+)?(imlaw|im law|escritorio|trabalho)\b/;
+  const pe = loose ? /\b(pessoal|minha conta|minha)\b/ : /\b(claude|conta|login)\s+(?:d[oa]s?\s+)?(pessoal|minha)\b/;
+  const a = im.test(t);
+  const b = pe.test(t);
+  return a === b ? null : a ? 'imlaw' : 'pessoal';
+}
+
+const ACCOUNT_QUESTION = (cfg) =>
+  `Antes de abrir o Orca: esse pedido é para o **${cfg?.imlaw?.label || 'Claude do escritório (ImLaw)'}** ou para o **${cfg?.pessoal?.label || 'Claude pessoal'}**? Responda "imlaw" ou "pessoal" que eu abro já com o pedido.`;
+
+// Briefing em texto para o prompt do Claude no Orca.
+function briefText(b) {
+  if (!b) return '';
+  const items = (title, list) => (list.length ? `\n${title}:\n${list.map((x) => `- ${x}`).join('\n')}` : '');
+  return [
+    `\nTarefa (preparada pela Ohara a partir da conversa): ${b.titulo}`,
+    `Objetivo: ${b.objetivo}`,
+    b.contexto ? `Contexto: ${b.contexto}` : '',
+    items('Pronto quando', b.criterios),
+    items('Confirme com ele antes de mexer, se precisar', b.duvidas),
+  ].filter(Boolean).join('\n');
+}
+
 function clip(text, max) {
   const s = String(text || '');
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
 class Orchestrator {
-  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null }) {
+  constructor({ chatsStore, prefsStore, usage, getConfig, emit, whatsapp = null, whatsappWeb = null, openExternal = null, ensureChrome = null, notify = null, actionCtx = null }) {
+    this.notify = notify; // notificação do Windows (lembretes da Ohara-AI)
+    this.actionCtxOverride = actionCtx; // testes: troca PowerShell e programas das ações no PC
     this.openExternal = openExternal; // abre URLs/URIs (shell.openExternal); habilita as ações locais
+    this.ensureChrome = ensureChrome; // abre o Chrome antes de pedidos de navegador, para a extensão Claude conectar
 
-    this.whatsapp = whatsapp; // CallMeBot: mensagens para o próprio Gabriel (opcional)
-    this.whatsappWeb = whatsappWeb; // WhatsApp Web: mensagens para contatos, sempre com confirmação (opcional)
+    this.whatsapp = getConfig().integrations.whatsapp?.enabled === false ? null : whatsapp; // CallMeBot: mensagens para o próprio Gabriel (opcional)
+    this.whatsappWeb = getConfig().integrations.whatsapp?.enabled === false ? null : whatsappWeb; // WhatsApp Web: mensagens para contatos, sempre com confirmação (opcional)
     this.chats = chatsStore; // JsonStore { chats: [] }
     this.prefs = prefsStore; // JsonStore { overrides: [] }
     this.usage = usage;
@@ -188,11 +252,28 @@ class Orchestrator {
     if (!this.projCache || this.projCache.root !== root || Date.now() - this.projCache.at > 5 * 60_000) {
       let list = [];
       try {
-        list = listRepos(root).map((p) => ({ name: path.basename(p), path: p }));
+        const self = this.getConfig().selfRepo ? path.resolve(this.getConfig().selfRepo).toLowerCase() : null;
+        list = listRepos(root).map((p) => ({ name: path.basename(p), path: p, self: path.resolve(p).toLowerCase() === self || path.basename(p).toLowerCase() === 'ohara' }));
       } catch {}
       this.projCache = { root, at: Date.now(), list };
     }
     return this.projCache.list;
+  }
+
+  // Pedido que vai ao Orca sem citar o projeto ("pode seguir", "encaminhe ao Claude"): procura o projeto
+  // na tarefa resumida pela Ohara-AI, depois nas mensagens recentes dele, depois no último projeto aberto
+  // no Orca nesta conversa. Assim o Claude abre dentro do projeto, e não na pasta geral.
+  #projectFromChat(chat, handoff) {
+    const projects = this.#projects();
+    const inText = (t) => (t ? findProject(normalize(t), projects)?.path || null : null);
+    const fromTask = inText(handoff?.task);
+    if (fromTask) return fromTask;
+    const users = chat.messages.filter((m) => m.role === 'user' && m.text).slice(-6).reverse();
+    for (const m of users) {
+      const p = inText(m.text);
+      if (p) return p;
+    }
+    return chat.lastProject && fs.existsSync(chat.lastProject) ? chat.lastProject : null;
   }
 
   // Categoria do último pedido roteado automaticamente nesta conversa.
@@ -204,16 +285,33 @@ class Orchestrator {
     return null;
   }
 
-  #route(chat, text, { hasImage, override }) {
-    return route(text, {
+  // O chat roda no modelo local. Só o que exige ferramentas (código, comandos, pesquisa, navegador)
+  // vai para o Claude, aberto no Orca. O roteador decide a categoria; aqui ela vira o destino.
+  #route(chat, text, { hasImage }) {
+    const config = this.getConfig();
+    const base = route(text, {
+      browser: config.claude?.chrome !== false && needsBrowser(text),
       hasImage,
-      override,
+      override: 'auto',
       usage: this.usage.limits(),
-      config: this.getConfig(),
-      learned: this.learned(),
+      config,
+      learned: {},
       projects: this.#projects(),
       previous: this.#previousCategory(chat),
     });
+    const continued = (base.reasons || []).some((r) => /continua o assunto/.test(r)) && !!chat?.messages.some((m) => m.route?.provider === 'orca');
+    // Só consulta o PC (espaço, memória, navegadores instalados...): a Ohara-AI lê sozinha, sem o Claude.
+    // Ação no PC (volume, print, arquivos, fechar programa, limpar, desligar...): a Ohara-AI faz sozinha,
+    // com confirmação para o que é arriscado. Projeto e código continuam com o Claude.
+    const pcAction = config.ollama?.tools !== false && config.ollama?.actions !== false && asksPcAction(text);
+    const pcInfo = pcAction || (config.ollama?.tools !== false && asksPcInfo(text));
+    // Pergunta ("tem como...?", "dá pra...?") não é ordem: quem decide é a Ohara-AI, não o verbo solto.
+    const question = QUESTION_RE.test(normalize(text));
+    const toAgent = !pcInfo && ((AGENT_CATEGORIES.has(base.category) && ((ACTION_RE.test(normalize(text)) && !question) || continued)) || (config.claude?.chrome !== false && needsBrowser(text)));
+    const reasons = [...(base.reasons || []), toAgent ? 'exige ferramentas: o Claude assume no Orca' : pcAction ? 'ação no PC: a Ohara-AI faz sozinha (o arriscado pede confirmação)' : pcInfo ? 'consulta do PC: a Ohara-AI lê sozinha' : 'conversa: modelo local'];
+    return toAgent
+      ? { ...base, provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined, reasons }
+      : { ...base, provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined, reasons };
   }
 
   preview(prompt, { hasImage, override, chatId }) {
@@ -237,7 +335,8 @@ class Orchestrator {
     let total = 0;
     for (const m of [...unseen].reverse()) {
       // O rascunho sai do texto; entra aqui para a IA saber o que está pronto (e não refazer à toa).
-      const drafts = (m.whatsappDrafts || []).map((d) => `\n[Mensagem de WhatsApp para "${d.to}" (${DRAFT_STATUS[d.status] || d.status}): ${clip(d.text, 600)}]`).join('');
+      const drafts = (m.whatsappDrafts || []).map((d) => `\n[Mensagem de WhatsApp para "${d.to}" (${DRAFT_STATUS[d.status] || d.status}): ${clip(d.text, 600)}]`).join('')
+        + (m.pcActions || []).map((a) => `\n[Ação no PC "${a.resumo}": ${ACTION_STATUS[a.status] || a.status}${a.error ? ` (${clip(a.error, 200)})` : ''}]`).join('');
       const line = `${m.role === 'user' ? 'Gabriel' : `Assistente (${m.provider})`}: ${clip(m.text, MAX_MSG_CHARS)}${drafts}`;
       if (total + line.length > MAX_CONTEXT_CHARS) break;
       out.unshift(line);
@@ -250,6 +349,7 @@ class Orchestrator {
   // o novo vai em paralelo, numa sessão separada que recebe o histórico como contexto.
   async send(chatId, { text, images = [], override = 'auto', permissionMode, source = 'chat', runId: clientRunId, onDelta }) {
     const config = this.getConfig();
+    if (source === 'voice' && config.voice.commandsEnabled === false) throw new Error('Comandos de voz desativados.');
     const chat = this.get(chatId);
     if (!chat) throw new Error('Conversa não encontrada');
 
@@ -257,14 +357,18 @@ class Orchestrator {
     if (!images.length && (!override || override === 'auto')) {
       const reply = await this.#tryDraftReply(chat, text, clientRunId, source);
       if (reply) return reply;
+      // Ação no PC esperando confirmação e ele respondeu "confirma"/"pode"/"cancela": resolve na hora.
+      const acted = await this.#tryActionReply(chat, text, clientRunId, source);
+      if (acted) return acted;
     }
 
-    // Ela se ofereceu para se alterar e ele aceitou: implementa no próprio repositório, com o modelo mais forte.
+    // Ela se ofereceu para se alterar e ele aceitou: o Claude implementa no repositório da Ohara, pelo Orca.
     const improvement = this.#acceptedImprovement(chat, text);
-    if (improvement) override = 'claude:profundo';
+    // Ela perguntou qual conta do Claude usar e ele respondeu: segue com o pedido guardado.
+    const answered = this.#answeredAccount(chat, text);
 
     // "abre o Spotify", "pesquisa no Google X": resolve na hora, sem IA e sem gastar cota.
-    if (this.openExternal && !images.length && (!override || override === 'auto')) {
+    if (this.openExternal && !images.length && !answered && (!override || override === 'auto')) {
       const local = await this.#tryQuickAction(chat, text, clientRunId, source);
       if (local) return local;
     }
@@ -272,12 +376,39 @@ class Orchestrator {
     const parallel = this.isRunning(chatId);
 
     const decision = this.#route(chat, text, { hasImage: images.length > 0, override });
+    if (improvement || answered) Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
+    // Ficaria no chat local: antes, a Ohara-AI relê a conversa e decide se é tarefa para o Claude
+    // ("pode seguir" depois de combinar uma alteração, "encaminhe ao Claude"). Não gasta cota, então sempre vale.
+    let handoff = null;
+    if (decision.provider === 'ollama' && !improvement && !answered && !images.length && (!override || override === 'auto')) {
+      const explicit = isHandoff(normalize(text));
+      // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
+      const skip = config.ollama?.decide === false || isSmallTalk(normalize(text)) || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && (asksPcInfo(text) || asksPcAction(text)));
+      // Limite curto: com o Ollama lento ou travado, o pedido ficava até 3 min invisível e sem como cancelar.
+      const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+      if (explicit || verdict?.acao === 'claude') {
+        handoff = { task: verdict?.tarefa || '' };
+        Object.assign(decision, { provider: 'orca', model: 'Claude no Orca', tier: undefined, effort: undefined });
+        decision.reasons = [...(decision.reasons || []), explicit ? 'pediu para mandar ao Claude' : 'a Ohara-AI leu a conversa: é tarefa para o Claude'];
+      } else if (verdict?.acao === 'claude_chat') {
+        // Não é projeto, mas o modelo local não dá conta: o Claude responde aqui mesmo, se houver cota.
+        const why = this.#claudeChatBlocked(config);
+        const motivo = verdict.motivo || 'o modelo local não basta';
+        if (!why) {
+          Object.assign(decision, { provider: 'claude', model: config.claude.models.equilibrado, tier: 'equilibrado', effort: 'medium' });
+          decision.reasons = [...(decision.reasons || []), `a Ohara-AI chamou o Claude no chat: ${motivo}`];
+        } else {
+          decision.reasons = [...(decision.reasons || []), `pedia o Claude (${motivo}), mas ${why}: ficou no modelo local`];
+        }
+      }
+    }
     if (source === 'voice' && decision.provider === 'claude' && VOICE_FAST.has(decision.category) && (!override || override === 'auto')) {
       Object.assign(decision, { tier: 'rapido', model: config.claude.models.rapido, effort: 'low' });
       decision.reasons = [...(decision.reasons || []), 'conversa por voz: modelo rápido'];
     }
     if (improvement) decision.reasons = [...(decision.reasons || []), 'melhoria aceita: a Ohara vai se alterar'];
-    if (source === 'chat' && !improvement) this.#remember(text, images.length > 0, override);
+    if (answered) decision.reasons = [...(decision.reasons || []), `conta escolhida: ${answered.account}`];
+    if (source === 'chat' && !improvement && !answered) this.#remember(text, images.length > 0, override);
 
     // Conversa nova na pasta padrão citando um projeto: já trabalha dentro dele.
     if (decision.project && !chat.messages.length && chat.cwd === config.defaultCwd) {
@@ -308,63 +439,79 @@ class Orchestrator {
     const ac = new AbortController();
     this.running.set(runId, { chatId, ac });
 
-    // Agente paralelo não reaproveita a sessão (ela está em uso): começa limpo, com o histórico.
-    // A automelhoria também roda à parte, porque trabalha em outra pasta (o repositório da Ohara).
-    const isolated = parallel || !!improvement;
-    const sess = isolated ? null : chat.sessions[decision.provider];
-    const context = this.#handoff(chat, decision.provider, { upTo: userIndex, fresh: isolated });
-    const cwd = improvement ? config.selfRepo : chat.cwd;
-    const request = improvement ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}` : text;
-    const askWhatsApp = wantsWhatsApp(text) && !!(this.whatsapp || this.whatsappWeb);
-    const onEvent = (ev) => {
-      if (ev.kind === 'limits') {
-        this.usage.updateClaudeLimits(ev.info);
-        this.emit('usage:update', this.usage.summary());
-        return;
-      }
-      if (ev.kind === 'tool') assistant.tools.push(ev.text);
-      if (ev.kind === 'delta' && onDelta) onDelta(ev.text); // voz: começa a falar antes da resposta terminar
-      this.emit('chat:event', { chatId, runId, ...ev });
-    };
+    // Pasta da conversa apagada ou renomeada: o Windows recusaria abrir o agente nela
+    // (e o erro aparece como "spawn claude ENOENT"). Volta para a pasta padrão.
+    if (!improvement && !answered && chat.cwd && !fs.existsSync(chat.cwd) && config.defaultCwd && fs.existsSync(config.defaultCwd)) {
+      decision.reasons = [...(decision.reasons || []), `a pasta ${chat.cwd} não existe mais: usando ${config.defaultCwd}`];
+      chat.cwd = config.defaultCwd;
+      chat.sessions = {};
+      this.emit('chats:changed', {});
+    }
 
-    const confirmContacts = !!config.integrations.whatsapp?.confirmContacts;
-    const extra = [
-      source === 'voice' ? VOICE_NOTE : '',
-      parallel ? PARALLEL_NOTE : '',
-      this.whatsappWeb ? CONTACTS_NOTE(confirmContacts) : '',
-      askWhatsApp ? WHATSAPP_NOTE : '',
-    ].filter(Boolean).join('\n');
-    const common = {
-      prompt: context + request,
-      cwd,
-      effort: decision.effort,
-      sessionId: sess?.id,
-      images,
-      config,
-      systemPrompt: systemPrompt(config, cwd) + (extra ? '\n' + extra : ''),
-      onEvent,
-      signal: ac.signal,
+    const cwd = answered
+      ? answered.pending.dir
+      : improvement
+        ? config.selfRepo
+        : decision.project?.path || (decision.provider === 'orca' ? this.#projectFromChat(chat, handoff) : null) || (chat.cwd !== config.defaultCwd ? chat.cwd : null);
+    const onEvent = (ev) => {
+      if (ev.kind === 'tool') assistant.tools.push(ev.text);
+      if (ev.kind === 'delta' && onDelta) onDelta(ev.text);
+      this.emit('chat:event', { chatId, runId, ...ev });
     };
 
     let result;
     try {
-      result =
-        decision.provider === 'codex'
-          ? await runCodex({ ...common, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
-          : await runClaude({ ...common, model: decision.model, permissionMode });
-
-      // Sessão expirada/inválida: tenta de novo do zero com o histórico transferido.
-      if (result.error && sess?.id && !ac.signal.aborted && !result.text) {
-        delete chat.sessions[decision.provider];
-        const retryCtx = this.#handoff(chat, decision.provider, { upTo: userIndex, fresh: true });
-        const retry = { ...common, prompt: retryCtx + request, sessionId: undefined };
-        result =
-          decision.provider === 'codex'
-            ? await runCodex({ ...retry, sandbox: permissionMode === 'bypassPermissions' ? 'danger-full-access' : undefined })
-            : await runClaude({ ...retry, model: decision.model, permissionMode });
+      if (decision.provider === 'orca') {
+        const request = answered
+          ? answered.pending.request
+          : improvement
+            ? `${selfImprovePrompt(improvement.desc, improvement.request)}\n\nResposta do Gabriel: ${text}`
+            : handoff
+              ? [handoff.task ? `Tarefa (resumida pela Ohara a partir da conversa): ${handoff.task}` : 'Faça a tarefa combinada na conversa recente.', `Última mensagem dele: ${text}`].join('\n')
+              : text;
+        const account = answered?.account || parseAccount(text);
+        // O nome do console e da branch saem da tarefa, não de "pode seguir".
+        // Melhoria aceita: o nome sai do que vai mudar, não do "sim".
+        const label = answered ? answered.pending.text : improvement ? improvement.desc : handoff?.task || text;
+        result = await this.#toOrca({
+          chat, config, text: label, request, cwd, userIndex, onEvent, assistant, account,
+          withContext: !!handoff, brief: answered?.pending.brief || null, hint: handoff?.task || '', signal: ac.signal,
+        });
+      } else if (decision.provider === 'claude') {
+        try {
+          result = await this.#claudeInChat({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source });
+        } catch (err) {
+          if (ac.signal.aborted) throw err;
+          // Claude fora (cota, login, privacidade sem o modelo local...): a Ohara-AI responde, sem deixar o pedido sem resposta.
+          decision.reasons = [...(decision.reasons || []), `o Claude não respondeu (${clip(err.message, 160)}): a Ohara-AI respondeu`];
+          onEvent({ kind: 'tool', text: 'Claude indisponível: respondendo no modelo local' });
+          Object.assign(decision, { provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined });
+          result = await chatLocal({
+            config,
+            history: chat.messages.slice(0, userIndex),
+            text,
+            project: cwd ? path.basename(cwd) : null,
+            signal: ac.signal,
+            onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+            onStep: (t) => onEvent({ kind: 'tool', text: t }),
+          });
+        }
+      } else {
+        result = await chatLocal({
+          config,
+          history: chat.messages.slice(0, userIndex),
+          text,
+          project: cwd ? path.basename(cwd) : null,
+          signal: ac.signal,
+          onDelta: (t) => onEvent({ kind: 'delta', text: t }),
+          onStep: (t) => onEvent({ kind: 'tool', text: t }),
+          actionCtx: this.#actionCtx(),
+        });
+        // A Ohara-AI não sabia: em vez de chutar ou devolver "não sei", pergunta ao Claude sozinha.
+        if (result?.consult) result = await this.#consultClaude({ chat, config, text, userIndex, decision, signal: ac.signal, onEvent, source, local: result });
       }
     } catch (err) {
-      result = { provider: decision.provider, model: decision.model, text: '', error: err.message, tokens: {} };
+      result = { provider: decision.provider, model: decision.model, text: '', error: ac.signal.aborted ? 'Cancelado.' : err.message, tokens: {} };
     } finally {
       this.running.delete(runId);
     }
@@ -372,7 +519,13 @@ class Orchestrator {
     assistant.text = result.text || '';
     assistant.error = result.error || null;
     assistant.model = result.model || decision.model;
+    assistant.provider = result.provider || assistant.provider; // o Claude no chat pode ter caído para a Ohara-AI
     assistant.tokens = result.tokens;
+    // Ações arriscadas que ela pediu: ficam na mensagem, esperando o botão "Confirmar" (ou "confirma").
+    if (result.pending?.length) {
+      assistant.pcActions = toPending(result.pending);
+      if (!/confirm/i.test(assistant.text)) assistant.text = assistant.text ? `${assistant.text}\n\n${askLine(assistant.pcActions)}` : askLine(assistant.pcActions);
+    }
     // Rascunho para contato vale mesmo quando o pedido não citou o WhatsApp ("envie a mensagem").
     const hasDraft = !!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text);
     // Por voz, conversa que não era com ela ("[[ignorar]]"): não responde nada.
@@ -380,8 +533,10 @@ class Orchestrator {
       assistant.ignored = true;
       assistant.text = '(ignorado: não parecia um pedido para a Ohara)';
     }
-    if ((askWhatsApp || hasDraft) && assistant.text && !assistant.error) {
-      await this.#handleWhatsApp(assistant, { toSelf: askWhatsApp, chat, autoSend: !confirmContacts });
+    // Envio desligado, mas a IA ainda montou um bloco (ex.: por causa do histórico): mostra o texto para copiar.
+    if (!this.whatsappWeb && /\[\[whatsapp\s+para/i.test(assistant.text)) {
+      const { text: rest, drafts } = extractDrafts(assistant.text);
+      assistant.text = [rest, ...drafts.map((d) => `**Mensagem para ${d.to}** (o envio pelo WhatsApp está desligado; copie e envie):\n\n${d.text}`)].filter(Boolean).join('\n\n');
     }
 
     // Oferta de automelhoria: guarda para o próximo "sim" e tira a marcação do texto.
@@ -392,20 +547,241 @@ class Orchestrator {
       chat.pendingImprovement = { desc: offer[1], request: text, at: Date.now() };
     }
 
-    // Só o agente principal guarda a sessão; o que ele não viu entra como contexto na próxima vez.
-    if (result.sessionId && !isolated) {
-      chat.sessions[decision.provider] = { id: result.sessionId, syncedUpTo: chat.messages.indexOf(assistant) + 1 };
-    }
     chat.updatedAt = Date.now();
     this.chats.save();
 
-    if (result.tokens && (result.tokens.input || result.tokens.output)) {
-      this.usage.record(decision.provider, assistant.model, result.tokens, source);
+    // Contabilidade de uso é secundária: uma falha aqui não pode impedir o "chat:done" (a tela ficaria presa em "rodando").
+    try {
+      // O modelo local e o Orca não consomem a cota do Claude/Codex.
+      this.emit('usage:update', this.usage.summary());
+    } catch (err) {
+      console.error('Falha ao registrar o uso:', err);
     }
-    if (decision.provider === 'codex') this.usage.refreshCodexLimits();
-    this.emit('usage:update', this.usage.summary());
     this.emit('chat:done', { chatId, runId, message: assistant, source, running: this.isRunning(chatId) });
     return assistant;
+  }
+
+  // Por que a Ohara-AI não pode chamar o Claude no chat agora (null = pode).
+  #claudeChatBlocked(config) {
+    if (config.ollama?.claudeChat === false) return 'isso está desligado nos Ajustes';
+    let limits = null;
+    try {
+      limits = this.usage.limits()?.claude || null;
+    } catch {}
+    if (limits?.status === 'rejected') return 'a cota do Claude acabou';
+    const max = config.quota?.claudeAvoidAt ?? 0.9;
+    if (claudeUtil(limits) >= max) return `a cota do Claude está em ${Math.round(claudeUtil(limits) * 100)}%`;
+    return null;
+  }
+
+  // A Ohara-AI respondeu "[[consultar_claude]]": o Claude responde no chat. Sem cota ou com erro,
+  // fica a resposta honesta do modelo local (nunca a marcação).
+  async #consultClaude({ chat, config, text, userIndex, decision, signal, onEvent, source, local }) {
+    const fallback = () => {
+      const t = local.text || 'Não sei responder isso com segurança agora, e não consegui consultar o Claude.';
+      onEvent({ kind: 'delta', text: t });
+      return { ...local, text: t, consult: undefined };
+    };
+    const why = this.#claudeChatBlocked(config);
+    if (why) {
+      decision.reasons = [...(decision.reasons || []), `a Ohara-AI não sabia (${local.consult}), mas ${why}: ficou no modelo local`];
+      return fallback();
+    }
+    onEvent({ kind: 'tool', text: `Ohara-AI não sabia (${clip(local.consult, 80)}): consultando o Claude` });
+    Object.assign(decision, { provider: 'claude', model: config.claude.models.equilibrado, tier: 'equilibrado', effort: 'medium' });
+    decision.reasons = [...(decision.reasons || []), `a Ohara-AI não sabia e consultou o Claude: ${local.consult}`];
+    try {
+      return await this.#claudeInChat({ chat, config, text, userIndex, decision, signal, onEvent, source });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      decision.reasons = [...(decision.reasons || []), `o Claude não respondeu (${clip(err.message, 160)})`];
+      Object.assign(decision, { provider: 'ollama', model: config.ollama?.model || 'local', tier: undefined, effort: undefined });
+      return fallback();
+    }
+  }
+
+  // O Claude responde no próprio chat: recebe a conversa como contexto, só tem internet e não salva sessão.
+  async #claudeInChat({ chat, config, text, userIndex, decision, signal, onEvent, source }) {
+    let prompt = `${this.#handoff(chat, 'claude', { upTo: userIndex, fresh: true })}${text}`;
+    // Privacidade ligada: CPF, nomes etc. viram marcadores antes de sair do PC. A resposta só aparece
+    // no fim, já com os nomes de volta (em pedaços ela mostraria os marcadores).
+    const priv = config.privacy || {};
+    let map = null;
+    if (priv.anonymizeCloud) {
+      const keep = [...(priv.keep || []), config.meetings?.selfName].filter(Boolean);
+      let a;
+      try {
+        a = await anonymize({ config, text: prompt, names: priv.names !== false, keep, signal, strict: true });
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        throw new Error(`a privacidade está ligada, mas ${e.message}; nada foi enviado para a nuvem`);
+      }
+      prompt = a.text;
+      map = Object.keys(a.map || {}).length ? a.map : null;
+    }
+    const systemPrompt = [CLAUDE_CHAT_NOTE, source === 'voice' ? VOICE_NOTE : ''].filter(Boolean).join('\n\n');
+    onEvent({ kind: 'tool', text: `Ohara-AI chamou o Claude (${decision.model})` });
+    const r = await runClaude({
+      config,
+      args: buildChatArgs({ model: decision.model, effort: decision.effort || 'medium', systemPrompt }),
+      cwd: os.tmpdir(),
+      prompt,
+      signal,
+      onEvent: (ev) => {
+        if (ev.kind === 'limits') {
+          try {
+            this.usage.updateClaudeLimits(ev.info);
+          } catch {}
+          return;
+        }
+        if (map && ev.kind === 'delta') return;
+        onEvent(ev);
+      },
+    });
+    if (r.error) throw new Error(r.error);
+    if (!r.text) throw new Error('resposta vazia');
+    try {
+      this.usage.record('claude', r.model, r.tokens, 'chat');
+    } catch {}
+    if (map) {
+      r.text = deanonymize(r.text, map);
+      onEvent({ kind: 'delta', text: r.text });
+    }
+    return r;
+  }
+
+  // Abre o Orca no projeto, na branch da tarefa, com o Claude já recebendo o pedido e o contexto.
+  async #toOrca({ chat, config, text, request, cwd, userIndex, onEvent, assistant, account = null, withContext = false, brief = null, hint = '', signal = null }) {
+    const general = config.orca?.generalDir || config.defaultCwd;
+    let dir = cwd && fs.existsSync(cwd) ? cwd : general;
+    const keyOf = (d) => path.resolve(d).toLowerCase();
+    // Console novo: antes de abrir, a Ohara analisa a conversa e monta a tarefa (título, branch, objetivo,
+    // contexto, critérios). Sem projeto definido, o assunto do briefing escolhe o projeto.
+    if (!brief && !chat.orca?.[keyOf(dir)]?.terminal) {
+      brief = await this.#brief({ chat, config, text, userIndex, hint, onEvent, signal });
+    }
+    if (brief?.projectPath && dir === general && fs.existsSync(brief.projectPath)) dir = brief.projectPath;
+    const key = keyOf(dir);
+    const state = chat.orca?.[key] || null;
+    // Console novo: usa a conta que ele já escolheu para este projeto (ou nesta conversa); só pergunta
+    // qual Claude (escritório ou pessoal) quando não há escolha anterior. Continuar no console aberto não pergunta.
+    if (!account && !state?.terminal && !state?.account) account = this.#knownAccount(chat, key, dir);
+    if (!account && !state?.terminal && !state?.account) {
+      chat.pendingOrca = { text, request, dir, brief, at: Date.now() };
+      return { provider: 'orca', model: 'Claude no Orca', text: ACCOUNT_QUESTION(config.orca?.accounts), tokens: {} };
+    }
+    const recent = chat.messages
+      .slice(0, userIndex)
+      .filter((m) => m.text)
+      .slice(-6)
+      .map((m) => `${m.role === 'user' ? 'Gabriel' : 'Ohara'}: ${clip(m.text, 700)}`)
+      .join('\n');
+    // Pedido de navegador: abre o Chrome antes (a extensão Claude in Chrome precisa dele aberto) e orienta o Claude.
+    let browserNote = '';
+    if (config.claude?.chrome !== false && wantsBrowser(text)) {
+      let issue = null;
+      if (this.ensureChrome) {
+        const chrome = await this.ensureChrome().catch((err) => ({ running: false, error: err.message }));
+        if (chrome?.started && chrome.running) onEvent({ kind: 'tool', text: 'Chrome: aberto para a extensão Claude conectar' });
+        if (!chrome?.running) issue = `não consegui abrir (${chrome?.error || 'erro desconhecido'})`;
+        else if (chrome.bridge === false) issue = chrome.error || 'a extensão Claude in Chrome não está registrada';
+        if (issue) onEvent({ kind: 'tool', text: `Chrome: ${issue}` });
+      }
+      browserNote = [chromeNote(findChrome()), issue ? chromeIssueNote(issue) : ''].filter(Boolean).join('\n');
+    }
+    // Console já aberto: manda só o pedido; se o pedido vem da conversa ("pode seguir"), leva a conversa junto.
+    const parts = state && state.terminal
+      ? [withContext && recent ? `Conversa recente com a Ohara:\n${recent}\n` : '', request]
+      : [
+          'Você foi aberto pela Ohara, assistente pessoal do Gabriel, para fazer esta tarefa. Responda em português do Brasil.',
+          `Pasta do projeto: ${dir}${dir === general ? ` (nenhum projeto definido; os repositórios ficam em ${config.workspaceRoot})` : ''}.`,
+          'Regras: commits sem linha de coautoria; não dê push, não publique e não faça nada destrutivo sem pedir confirmação a ele; no fim, resuma em poucas frases o que foi feito.',
+          'Vá a fundo antes de mexer: leia o código relacionado, reproduza o problema e confirme a causa. Se o pedido for vago, investigue e proponha um plano curto antes de alterar.',
+          briefText(brief),
+          recent ? `\nConversa recente com a Ohara:\n${recent}` : '',
+          browserNote ? `\n${browserNote}` : '',
+          `\n${brief ? 'Mensagem original do Gabriel' : 'Pedido do Gabriel'}:\n${request}`,
+        ];
+    // Aspas duplas viram "^" no caminho até o Orca: troca por aspas tipográficas.
+    const prompt = parts.filter(Boolean).join('\n').replace(/"/g, '”');
+    onEvent({ kind: 'tool', text: 'Orca: abrindo o projeto e o Claude' });
+    const r = await sendToOrca({ config, cwd: dir, request: text, prompt, state, account, branch: brief?.branch || null, title: brief?.titulo || null, objective: brief?.objetivo || null });
+    (chat.orca ||= {})[key] = r.state;
+    if (dir !== general) chat.lastProject = dir;
+    this.#rememberAccount(chat, key, r.state?.account || account);
+    const where = r.branch ? `no projeto **${path.basename(r.root)}**, na branch \`${r.branch}\`` : `na pasta **${path.basename(r.root)}**`;
+    const msg = r.reused
+      ? `Mandei o pedido para o Claude que já está trabalhando ${where}, no Orca.`
+      : `Abri o Orca ${where}, com o Claude já recebendo o pedido e o contexto da nossa conversa. Acompanhe e responda por lá.`;
+    assistant.orca = { branch: r.branch, root: r.root, reused: r.reused };
+    return { provider: 'orca', model: 'Claude no Orca', text: msg, tokens: {} };
+  }
+
+  // Briefing da tarefa: primeiro no modelo local (sem cota); se não servir, pede ao Claude no chat
+  // (só com cota e sem a privacidade ligada, que exigiria anonimizar). Falhou tudo → null (pedido como veio).
+  async #brief({ chat, config, text, userIndex, hint, onEvent, signal }) {
+    if (config.orca?.brief === false) return null;
+    const history = chat.messages.slice(0, userIndex);
+    const projects = this.#projects();
+    onEvent({ kind: 'tool', text: 'Ohara-AI: analisando a conversa para montar a tarefa' });
+    let b = await briefLocal({ config, history, text, projects, hint, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(25_000)]) : AbortSignal.timeout(25_000) }).catch((e) => {
+      if (signal?.aborted) throw e;
+      return null;
+    });
+    if (b || this.#claudeChatBlocked(config) || config.privacy?.anonymizeCloud) return b;
+    onEvent({ kind: 'tool', text: 'Briefing: o modelo local não conseguiu, pedindo ao Claude' });
+    const convo = history
+      .filter((m) => m.text)
+      .slice(-10)
+      .map((m) => `${m.role === 'user' ? 'Gabriel' : 'Ohara'}: ${clip(m.text, 900)}`)
+      .join('\n');
+    try {
+      const r = await runClaude({
+        config,
+        args: buildChatArgs({ model: config.claude.models.rapido, effort: 'low', systemPrompt: BRIEF_PROMPT }),
+        cwd: os.tmpdir(),
+        prompt: briefInput({ convo, text, projects, hint }),
+        signal,
+        onEvent: () => {},
+      });
+      b = r.error ? null : parseBrief(r.text, projects);
+      if (b) {
+        try {
+          this.usage.record('claude', r.model, r.tokens, 'chat');
+        } catch {}
+      }
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      b = null;
+    }
+    return b;
+  }
+
+  // Conta já escolhida: a deste projeto (lembrada entre conversas), a da conversa, ou ImLaw pelo caminho.
+  #knownAccount(chat, key, dir) {
+    const saved = this.prefs?.data?.accounts?.[key];
+    if (saved === 'imlaw' || saved === 'pessoal') return saved;
+    if (chat.lastAccount === 'imlaw' || chat.lastAccount === 'pessoal') return chat.lastAccount;
+    return /imlaw/i.test(String(dir || '')) ? 'imlaw' : null;
+  }
+
+  #rememberAccount(chat, key, account) {
+    if (account !== 'imlaw' && account !== 'pessoal') return;
+    chat.lastAccount = account;
+    if (!this.prefs?.data) return;
+    (this.prefs.data.accounts ||= {})[key] = account;
+    try {
+      this.prefs.save();
+    } catch {}
+  }
+
+  // Resposta ("imlaw"/"pessoal") à pergunta de qual Claude abrir, até 30 min depois.
+  #answeredAccount(chat, text) {
+    const pending = chat.pendingOrca;
+    if (!pending) return null;
+    delete chat.pendingOrca; // vale só para a resposta seguinte
+    const account = parseAccount(text, { loose: true });
+    return account && Date.now() - pending.at < 30 * 60_000 ? { pending, account } : null;
   }
 
   // "sim"/"pode fazer" logo depois de ela oferecer uma melhoria (até 30 min depois).
@@ -443,7 +819,7 @@ class Orchestrator {
     return assistant;
   }
 
-  // Contato → envia na hora (ou deixa para confirmar, se ele ligou a confirmação); sem contato → vai para o próprio Gabriel.
+  // Contato → mostra o contato achado e espera a confirmação (ou envia na hora, se ele desligou a confirmação); sem contato → vai para o próprio Gabriel.
   async #handleWhatsApp(assistant, { toSelf = true, chat = null, autoSend = true } = {}) {
     const { text, drafts } = extractDrafts(assistant.text);
     if (drafts.length) {
@@ -453,7 +829,24 @@ class Orchestrator {
         for (const d of assistant.whatsappDrafts) Object.assign(d, { status: 'error', error: 'Envio para contatos indisponível.' });
         return;
       }
-      if (!autoSend || !chat) return;
+      if (!chat) return;
+      if (!autoSend) {
+        // Acha o contato de verdade e mostra o nome para ele confirmar; o envio vai exatamente para esse contato.
+        const lines = [];
+        for (const d of assistant.whatsappDrafts) {
+          if (!this.whatsappWeb.resolve) continue;
+          try {
+            const { to } = await this.whatsappWeb.resolve(d.to);
+            d.contact = to;
+            lines.push(`Achei o contato "${to}" no seu WhatsApp. É esse? Diga "confirmado" para enviar ou "cancela".`);
+          } catch (err) {
+            Object.assign(d, { status: 'error', error: err.message });
+            lines.push(`Ainda não enviei para ${d.to}: ${err.message}`);
+          }
+        }
+        if (lines.length) assistant.text = `${assistant.text}\n\n${lines.join('\n')}`.trim();
+        return;
+      }
       const lines = [];
       for (let i = 0; i < assistant.whatsappDrafts.length; i++) {
         const d = assistant.whatsappDrafts[i];
@@ -481,6 +874,74 @@ class Orchestrator {
     }
   }
 
+  // ---------- Ações no PC com confirmação ----------
+
+  // Contexto das ações da Ohara-AI: lembretes viram notificação do Windows.
+  #actionCtx() {
+    if (this.actionCtxOverride) return this.actionCtxOverride;
+    return {
+      schedule: (texto, ms) => {
+        const t = setTimeout(() => this.notify?.('Lembrete da Ohara', texto), ms);
+        t.unref?.();
+        return Date.now() + ms;
+      },
+    };
+  }
+
+  #findAction(chatId, messageId, index = 0) {
+    const chat = this.get(chatId);
+    const msg = chat?.messages.find((m) => m.id === messageId);
+    const action = msg?.pcActions?.[index];
+    if (!action) throw new Error('Ação não encontrada.');
+    return { chat, msg, action };
+  }
+
+  /**
+   * Executa uma ação pendente. Chamado pelo botão "Confirmar" ou quando ele responde "confirma".
+   * O que roda é o que está guardado na mensagem: a tela só diz qual item confirmar.
+   */
+  async confirmPcAction(chatId, messageId, index = 0) {
+    const { chat, msg, action } = this.#findAction(chatId, messageId, index);
+    const onChange = () => {
+      chat.updatedAt = Date.now();
+      this.chats.save();
+      this.emit('chat:message', { chatId, message: msg });
+    };
+    return runPending(action, defaultCtx(this.#actionCtx()), { onChange });
+  }
+
+  cancelPcAction(chatId, messageId, index = 0) {
+    const { msg, action } = this.#findAction(chatId, messageId, index);
+    if (action.status !== 'pending') return action;
+    action.status = 'cancelled';
+    this.chats.save();
+    this.emit('chat:message', { chatId, message: msg });
+    return action;
+  }
+
+  // "confirma", "pode", "sim" → faz as ações pendentes da última resposta; "cancela", "não" → descarta.
+  async #tryActionReply(chat, text, clientRunId, source) {
+    const last = [...chat.messages].reverse().find((m) => m.role === 'assistant');
+    const onChange = () => {
+      this.chats.save();
+      this.emit('chat:message', { chatId: chat.id, message: last });
+    };
+    const reply = await replyToPending(last, text, defaultCtx(this.#actionCtx()), { onChange });
+    if (!reply) return null;
+    delete chat.pendingImprovement; // "sim" aqui é para a ação, não para a oferta de melhoria
+    const { intent, lines } = reply;
+    const runId = clientRunId || crypto.randomUUID();
+    const route = { provider: 'local', model: 'ação local', category: 'local', label: 'Ação no PC', reasons: [intent === 'cancel' ? 'cancelou a ação pendente, sem IA' : 'confirmou a ação pendente, sem IA'] };
+    chat.messages.push({ role: 'user', text, images: [], at: Date.now() });
+    const assistant = { id: runId, role: 'assistant', text: lines.join('\n'), provider: 'local', model: 'ação local', route, tools: [], at: Date.now() };
+    chat.messages.push(assistant);
+    chat.updatedAt = Date.now();
+    this.chats.save();
+    this.emit('chat:route', { chatId: chat.id, runId, route });
+    this.emit('chat:done', { chatId: chat.id, runId, message: assistant, source, running: this.isRunning(chat.id) });
+    return assistant;
+  }
+
   #findDraft(chatId, messageId, index = 0) {
     const chat = this.get(chatId);
     const msg = chat?.messages.find((m) => m.id === messageId);
@@ -503,7 +964,7 @@ class Orchestrator {
     if (!this.whatsappWeb) return null;
     const found = this.#openDrafts(chat);
     if (!found) return null;
-    const intent = parseSendReply(text, found.open.map(({ d }) => d.to));
+    const intent = parseSendReply(text, found.open.flatMap(({ d }) => [d.to, d.contact].filter(Boolean)));
     if (!intent) return null;
     // "sim" sozinho com uma oferta de melhoria aberta: a pergunta era a melhoria, não o envio.
     if (intent === 'yes' && chat.pendingImprovement && Date.now() - chat.pendingImprovement.at < 30 * 60_000) return null;
@@ -546,7 +1007,7 @@ class Orchestrator {
     draft.error = null;
     this.emit('chat:message', { chatId, message: msg });
     try {
-      const { to } = await this.whatsappWeb.send(draft.to, draft.text);
+      const { to } = await this.whatsappWeb.send(draft.contact || draft.to, draft.text);
       Object.assign(draft, { status: 'sent', sentTo: to, sentAt: Date.now() });
     } catch (err) {
       Object.assign(draft, { status: 'error', error: err.message });

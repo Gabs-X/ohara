@@ -103,10 +103,15 @@ document.querySelectorAll('[data-brief]').forEach((btn) =>
     if (td.generating) return;
     td.generating = btn.dataset.brief;
     renderToday();
-    const r = await central.makeBriefing(btn.dataset.brief);
-    td.generating = null;
-    if (!r.ok) toast(r.error, 'error');
-    renderToday();
+    try {
+      const r = await central.makeBriefing(btn.dataset.brief);
+      if (!r?.ok) toast(r?.error || 'Não consegui gerar o briefing.', 'error');
+    } catch (err) {
+      toast(err.message, 'error');
+    } finally {
+      td.generating = null; // sem isto, um erro deixava os botões de briefing mortos até reiniciar
+      renderToday();
+    }
   }),
 );
 

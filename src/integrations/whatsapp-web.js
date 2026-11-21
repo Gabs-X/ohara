@@ -1,8 +1,10 @@
 // Envio para contatos pelo WhatsApp Web do próprio Gabriel, numa janela do Electron com sessão persistente.
 // Conecta uma vez pelo QR Code. Não é API oficial: o WhatsApp pode mudar a página (e, em tese, restringir a conta).
-// Só envia depois de confirmação explícita na interface (ver Orchestrator.confirmWhatsApp).
+// O Orchestrator acha o contato (resolve), mostra para ele confirmar e só então envia (send).
 const { BrowserWindow, session } = require('electron');
 const { pickContact } = require('./whatsapp');
+const { searchBox, contactRows, outgoingMessages, sendState } = require('./whatsapp-dom');
+const { focusForInput, sendInput } = require('./whatsapp-input');
 
 const URL_WA = 'https://web.whatsapp.com/';
 const PARTITION = 'persist:whatsapp';
@@ -85,41 +87,40 @@ class WhatsAppWeb {
     return this.#waitFor('!!document.querySelector("#pane-side")', 45000, 'WhatsApp Web não conectado: abra Ajustes → WhatsApp → Conectar e escaneie o QR Code.');
   }
 
-  async #typeInto(selector, text) {
+  async #typeInto(selector, text, expression = null) {
+    focusForInput(this.#window());
     const wc = this.#window().webContents;
-    const found = await this.#js(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return false; el.focus(); document.execCommand('selectAll'); document.execCommand('delete'); return true; })()`);
+    const found = await this.#js(`(() => { const el = ${expression || `document.querySelector(${JSON.stringify(selector)})`}; if (!el) return false; el.focus(); if (el.tagName === 'INPUT') el.select(); else { const range = document.createRange(); range.selectNodeContents(el); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); } return true; })()`);
     if (!found) throw new Error('A página do WhatsApp mudou: campo não encontrado.');
     // Quebras de linha viram Shift+Enter para não enviar no meio.
     const lines = String(text).split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (i) {
-        wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter', modifiers: ['shift'] });
-        wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter', modifiers: ['shift'] });
+        sendInput(this.#window(), { type: 'keyDown', keyCode: 'Enter', modifiers: ['shift'] });
+        sendInput(this.#window(), { type: 'keyUp', keyCode: 'Enter', modifiers: ['shift'] });
       }
       if (lines[i]) await wc.insertText(lines[i]);
     }
   }
 
   #pressEnter() {
-    const wc = this.#window().webContents;
-    wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-    wc.sendInputEvent({ type: 'char', keyCode: '\r' });
-    wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    sendInput(this.#window(), { type: 'keyDown', keyCode: 'Enter' });
+    sendInput(this.#window(), { type: 'char', keyCode: '\r' });
+    sendInput(this.#window(), { type: 'keyUp', keyCode: 'Enter' });
   }
 
   // Pesquisa na lista de conversas/contatos e devolve os nomes encontrados.
   async #search(query) {
-    const box = '#side [contenteditable="true"]';
-    await this.#typeInto(box, query);
+    const expression = `(${searchBox.toString()})()`;
+    await this.#waitFor(`!!${expression}`, 15000, 'Não encontrei a busca de contatos do WhatsApp Web.');
+    await this.#typeInto(null, query, expression);
     await sleep(1500);
     // Só o título de cada resultado (o nome da conversa), não a prévia da última mensagem.
-    return this.#js(`[...document.querySelectorAll('#pane-side [role="listitem"], #pane-side [role="row"]')]
-      .map((item) => item.querySelector('span[title]')?.getAttribute('title'))
-      .filter(Boolean)
-      .slice(0, 15)`);
+    return this.#js(`(${contactRows.toString()})().map(row => row.name)`);
   }
 
-  async #openChatByName(query) {
+  // Acha o nome da conversa que corresponde a `query`, sem abrir nem enviar nada.
+  async #findContact(query) {
     // Nome parcial ou mal transcrito: se a busca não achar nada, tenta a primeira palavra e depois só o começo dela.
     const first = String(query).trim().split(/\s+/)[0] || query;
     const tries = [...new Set([query, first, first.slice(0, 4), first.slice(0, 3)])].filter((t) => t.length >= 2);
@@ -128,16 +129,26 @@ class WhatsAppWeb {
       titles = await this.#search(t);
       if (titles.length) break;
     }
-    const pick = pickContact(query, titles);
+    // Nome exato (ex.: o contato que ele já confirmou) ganha de qualquer parecido.
+    const exact = [...new Set(titles.filter((t) => norm(t) === norm(query)))];
+    if (exact.length === 1) return { name: exact[0] };
+    return pickContact(query, titles);
+  }
+
+  async #openChatByName(query) {
+    const pick = await this.#findContact(query);
     if (pick.error) throw new Error(pick.error);
-    const clicked = await this.#js(`(() => {
-      const span = [...document.querySelectorAll('#pane-side span[title]')].find((s) => s.getAttribute('title') === ${JSON.stringify(pick.name)});
-      const item = span && (span.closest('[role="listitem"]') || span.closest('[role="row"]') || span.closest('[tabindex]'));
-      if (!item) return false;
-      for (const type of ['mousedown', 'mouseup', 'click']) item.dispatchEvent(new MouseEvent(type, { bubbles: true }));
-      return true;
+    const target = await this.#js(`(() => {
+      const item = (${contactRows.toString()})().find(row => row.name === ${JSON.stringify(pick.name)})?.item;
+      if (!item) return null;
+      item.scrollIntoView({ block: 'nearest' });
+      const rect = (item.querySelector('span[title]') || item).getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
     })()`);
-    if (!clicked) throw new Error(`Não consegui abrir a conversa com ${pick.name}.`);
+    if (!target) throw new Error(`Não consegui abrir a conversa com ${pick.name}.`);
+    sendInput(this.#window(), { type: 'mouseDown', ...target, button: 'left', clickCount: 1 });
+    sendInput(this.#window(), { type: 'mouseUp', ...target, button: 'left', clickCount: 1 });
     return pick.name;
   }
 
@@ -152,6 +163,39 @@ class WhatsAppWeb {
     return this.#js(`(() => { const h = document.querySelector('#main header span[title], #main header span[dir="auto"]'); return h ? (h.getAttribute('title') || h.textContent) : ''; })()`);
   }
 
+  // Espera a mensagem aparecer na conversa; se não aparecer a tempo, devolve o último estado visto.
+  async #sendState(before, text, timeoutMs = 15000) {
+    const code = `(() => { ${outgoingMessages.toString()}; return (${sendState.toString()})(${JSON.stringify(before)}, ${JSON.stringify(text)}); })()`;
+    const end = Date.now() + timeoutMs;
+    let state = { sent: false, composer: 'missing' };
+    while (Date.now() < end) {
+      try {
+        state = await this.#js(code);
+        if (state.sent) return state;
+      } catch { /* página atualizando */ }
+      await sleep(400);
+    }
+    return state;
+  }
+
+  /**
+   * Descobre para qual contato `to` iria, sem enviar: é o que a Ohara mostra para ele confirmar.
+   * Retorna { to } com o nome exato da conversa (ou o número com DDI).
+   */
+  resolve(to) {
+    const job = this.queue.then(async () => {
+      const isNumber = /^\+?[\d\s()-]{10,}$/.test(String(to).trim());
+      if (isNumber) return { to: `+${String(to).replace(/\D/g, '')}` };
+      this.#window();
+      await this.#ready();
+      const pick = await this.#findContact(to);
+      if (pick.error) throw new Error(pick.error);
+      return { to: pick.name };
+    });
+    this.queue = job.catch(() => {});
+    return job;
+  }
+
   /**
    * Envia `text` para um contato (nome como está no WhatsApp) ou número com DDI.
    * Retorna { to } com o nome da conversa em que a mensagem foi enviada.
@@ -163,15 +207,18 @@ class WhatsAppWeb {
       await this.#ready();
       const isNumber = /^\+?[\d\s()-]{10,}$/.test(String(to).trim());
       const name = isNumber ? await this.#openChatByNumber(to) : await this.#openChatByName(to);
+      if (!isNumber) await this.#waitFor(`(() => { const h = document.querySelector('#main header span[title], #main header span[dir="auto"]'); return h && (h.getAttribute('title') || h.textContent) === ${JSON.stringify(name)}; })()`, 15000, `A conversa com ${name} não abriu.`);
       await this.#waitFor('!!document.querySelector(\'#main footer [contenteditable="true"]\')', 15000, `A conversa com ${name} não abriu.`);
       const opened = (await this.#currentChatName()) || name;
       if (!isNumber && norm(opened) !== norm(name)) throw new Error(`Abriu a conversa errada (${opened}); nada foi enviado.`);
       await this.#typeInto('#main footer [contenteditable="true"]', text);
       await sleep(300);
+      const before = await this.#js(`(${outgoingMessages.toString()})().map(m => m.id)`);
       this.#pressEnter();
-      await sleep(1200);
-      const pending = await this.#js(`(document.querySelector('#main footer [contenteditable="true"]')?.textContent || '').trim().length`);
-      if (pending) throw new Error('A mensagem foi escrita mas não saiu; confira a janela do WhatsApp.');
+      const state = await this.#sendState(before, text);
+      // Sem balão reconhecido mas com o campo vazio: o WhatsApp aceitou o texto (ele só sai do campo quando é enviado).
+      if (!state.sent && state.composer === 'filled') throw new Error('A mensagem ficou no campo de texto e não saiu; confira a janela do WhatsApp.');
+      if (!state.sent && state.composer === 'missing') throw new Error('Não confirmei a saída da mensagem; confira a conversa antes de tentar novamente.');
       return { to: opened };
     });
     this.queue = job.catch(() => {});

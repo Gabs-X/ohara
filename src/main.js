@@ -1,10 +1,14 @@
 const {
   app, BrowserWindow, Tray, Menu, Notification, globalShortcut, ipcMain, dialog, desktopCapturer, screen, shell, nativeImage, clipboard, session, safeStorage,
 } = require('electron');
+if (process.argv.includes('--ohara-desktop-probe')) {
+  require('./core/desktop-probe').runDesktopProbe();
+  return;
+}
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DEFAULT_CONFIG } = require('./core/config');
+const { DEFAULT_CONFIG, simplifyConfig } = require('./core/config');
 const { JsonStore, deepMerge } = require('./core/store');
 const { UsageTracker } = require('./core/usage');
 const { Orchestrator } = require('./core/orchestrator');
@@ -16,12 +20,19 @@ const { Calendar } = require('./integrations/calendar');
 const { GitHub } = require('./integrations/github');
 const { Slack } = require('./integrations/slack');
 const { Whisper } = require('./integrations/whisper');
-const { WhatsApp, formatTasksMessage } = require('./integrations/whatsapp');
-const { WhatsAppWeb } = require('./integrations/whatsapp-web');
+const { ensureChrome } = require('./integrations/chrome');
 const system = require('./core/system');
 const { trashOldInstallers, uninstallLegacyApp } = require('./core/cleanup');
 const { NeuralTTS, NEURAL_VOICES, isNeural, cleanForSpeech, splitForSpeech, takeSpeakable } = require('./integrations/tts');
 const { matchWake, isEndPhrase, isMicOff } = require('./core/wake');
+const textFix = require('./core/text-fix');
+const { askOnce } = require('./core/ai');
+const { InterviewService } = require('./core/interview');
+const { DocIndex } = require('./core/doc-index');
+const localTools = require('./core/local-tools');
+const localLlm = require('./core/local-llm');
+const { extractText } = require('./core/doc-text');
+const { isAppPage, sanitizeConfigPatch, assertSafeToOpen } = require('./core/ipc-guard');
 
 // Desenvolvimento: CENTRAL_DATA_DIR usa outra pasta de dados (e permite rodar ao lado do app instalado).
 if (process.env.CENTRAL_DATA_DIR) app.setPath('userData', process.env.CENTRAL_DATA_DIR);
@@ -48,11 +59,34 @@ if (!app.requestSingleInstanceLock()) {
 
 const dataDir = app.getPath('userData');
 const configFile = path.join(dataDir, 'config.json');
+
+// Erro inesperado em segundo plano (timer, evento de arquivo, rede): registra em erros.log e segue rodando,
+// em vez de abrir a caixa "A JavaScript error occurred in the main process" e deixar o app instável.
+function errorLog(kind, err) {
+  const file = path.join(dataDir, 'erros.log');
+  try {
+    if (fs.existsSync(file) && fs.statSync(file).size > 300_000) fs.renameSync(file, `${file}.old`);
+    fs.appendFileSync(file, `${new Date().toLocaleString('pt-BR')}  [${kind}] ${err?.stack || err}\n`);
+  } catch { /* registro é opcional */ }
+}
+process.on('uncaughtException', (err) => errorLog('exceção', err));
+process.on('unhandledRejection', (err) => errorLog('promessa', err));
+const guarded = (name, fn) => () => {
+  try {
+    const r = fn();
+    if (r && typeof r.catch === 'function') r.catch((err) => errorLog(name, err));
+  } catch (err) {
+    errorLog(name, err);
+  }
+};
 const capturesDir = path.join(dataDir, 'capturas');
 const ICON = path.join(__dirname, 'assets', 'icon.png');
 
 let win = null;
 let quick = null;
+let listeningIndicator = null;
+let interviewWin = null;
+let listeningStatus = { mode: 'off', text: 'Microfone desligado' };
 let tray = null;
 let quitting = false;
 const hotkeyStatus = {};
@@ -117,7 +151,7 @@ function loadConfig() {
   const user = decryptSecrets(readUserConfig());
   // Compatibilidade com a 0.1: "hotkey" virou "hotkeys.toggle".
   if (user.hotkey && !user.hotkeys) user.hotkeys = { toggle: user.hotkey };
-  return deepMerge(DEFAULT_CONFIG, user);
+  return simplifyConfig(deepMerge(DEFAULT_CONFIG, user));
 }
 
 // O que vai para a interface: segredos viram só "configurado".
@@ -145,10 +179,15 @@ const autoStore = store('automations.json', {});
 const stores = [chatsStore, usageStore, prefsStore, meetingsStore, insightsStore, autoStore];
 
 const usage = new UsageTracker(usageStore);
+usage.codexOn = () => config.codex?.enabled === true;
 
 // Envia para todas as janelas (principal e rápida).
+// Atualização automática (só no instalado; no portátil e em desenvolvimento fica desligada).
+const { startUpdater } = require('./updater');
+let updater = { state: () => ({ status: 'unsupported' }), check: async () => ({ status: 'unsupported' }), install() {} };
+
 const send = (channel, payload) => {
-  for (const w of [win, quick]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
+  for (const w of [win, quick, listeningIndicator, interviewWin]) if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
 };
 
 // ---------- Fala ----------
@@ -287,19 +326,31 @@ async function voiceCommand(text) {
 
 // Salva parte da configuração (da tela de Ajustes ou de um comando de voz) e aplica na hora.
 function updateConfig(partial) {
+  if (partial.codex?.developmentPermissions !== undefined && !['restricted', 'full'].includes(partial.codex.developmentPermissions)) {
+    throw new Error('Permissão de desenvolvimento inválida.');
+  }
+  if (partial.codex?.enabled !== undefined && typeof partial.codex.enabled !== 'boolean') throw new Error('Valor inválido para "Usar o Codex".');
   // Ignora o marcador "••••••" que a interface mostra no lugar do segredo.
   for (const p of SECRETS) if (getIn(partial, p) === '••••••') setIn(partial, p, undefined);
   const user = encryptSecrets(deepMerge(readUserConfig(), partial));
   fs.writeFileSync(configFile, JSON.stringify(user, null, 2));
-  config = deepMerge(DEFAULT_CONFIG, decryptSecrets(structuredClone(user)));
+  config = simplifyConfig(deepMerge(DEFAULT_CONFIG, decryptSecrets(structuredClone(user))));
   if (partial.hotkeys) registerHotkeys();
   if (partial.meetings) meetings.start();
   if (partial.integrations?.calendarIcsUrl !== undefined) calendar.refresh(true);
   if (partial.integrations?.slack) slack.users = null;
   const pub = publicConfig();
+  if (partial.codex?.enabled !== undefined && !partial.voice) send('config:changed', pub); // some/volta o Codex nos menus
   if (partial.voice) {
+    if (partial.voice.wakeWord !== undefined) {
+      if (!config.voice.wakeWord) endVoiceSession(false);
+      setListeningStatus(config.voice.wakeWord
+        ? { mode: 'starting', text: 'Abrindo microfone…' }
+        : { mode: 'off', text: 'Microfone desligado' });
+    }
     send('config:changed', pub); // a janela liga/desliga a escuta
     trayRebuild(); // atualiza o "Ouvir 'Ohara'" da bandeja
+    syncListeningIndicator();
   }
   return pub;
 }
@@ -391,11 +442,18 @@ function stopSpeaking() {
   if (win && !win.isDestroyed()) win.webContents.send('tts:stop');
 }
 
-// Notificação do Windows; ao clicar, abre a tela certa.
+// Notificação do Windows; ao clicar, abre a tela certa. Fica guardada até fechar: sem referência,
+// o coletor de lixo pode descartar o objeto e o clique (minutos depois) não abre nada.
+const liveNotifications = new Set();
 function notify(title, body, view = null, chatId = null) {
   if (!Notification.isSupported()) return;
   const n = new Notification({ title, body, icon: ICON });
+  liveNotifications.add(n);
+  const forget = () => liveNotifications.delete(n);
+  n.on('close', forget);
+  setTimeout(forget, 30 * 60 * 1000).unref?.();
   n.on('click', () => {
+    forget();
     if (view === 'chat' && chatId) {
       showView('chat');
       send('chat:open', chatId);
@@ -404,23 +462,19 @@ function notify(title, body, view = null, chatId = null) {
   n.show();
 }
 
-const whatsapp = new WhatsApp({ getConfig });
-const whatsappWeb = new WhatsAppWeb({ icon: ICON });
-const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, whatsapp, whatsappWeb, openExternal: (url) => shell.openExternal(url) });
+const disabledFeature = () => { throw new Error("Recurso desativado nesta versão da Ohara."); };
+const orchestrator = new Orchestrator({ chatsStore, prefsStore, usage, getConfig, emit: send, openExternal: (url) => shell.openExternal(url), ensureChrome: () => ensureChrome(), notify: (t, b) => notify(t, b, 'chat') });
 const meetings = new MeetingsService({
   store: meetingsStore, usage, getConfig, emit: send, notify: (t, b) => notify(t, b, 'meetings'),
-  // Demanda nova depois de uma reunião: avisa no seu WhatsApp.
-  onNewTasks: (m, tasks) => {
-    if (!whatsapp.configured || getConfig().integrations.whatsapp?.notifyMeetingTasks === false) return;
-    whatsapp.send(formatTasksMessage(m.title, tasks)).catch((err) => notify('WhatsApp', `Não consegui avisar das demandas: ${err.message}`));
-  },
 });
 const calendar = new Calendar({ getConfig });
 const github = new GitHub({ getConfig });
 const slack = new Slack({ getConfig });
 const whisper = new Whisper({ dir: path.join(dataDir, 'whisper'), getConfig });
+const interview = new InterviewService({ whisper, getConfig, emit: send, dataDir, usage });
 const neuralTts = new NeuralTTS({ dir: path.join(os.tmpdir(), 'ohara-fala') });
 const insights = new Insights({ meetings, store: insightsStore, usage, getConfig, emit: send, notify, calendar });
+const docIndex = new DocIndex({ file: path.join(dataDir, 'documentos-indice.json'), getConfig, emit: send });
 let trayRebuild = () => {};
 const automations = new Automations({
   store: autoStore, orchestrator, insights, meetings, slack, usage, getConfig, notify,
@@ -437,12 +491,15 @@ function secureWindow(w) {
     return { action: 'deny' };
   });
   w.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file:')) {
-      e.preventDefault();
-      if (/^https?:|^mailto:/.test(url)) shell.openExternal(url);
-    }
+    // Só deixa navegar entre as páginas do próprio app. Um arquivo arrastado para a janela
+    // (ou um link file: qualquer) abriria com o preload e teria acesso à API da Ohara.
+    if (isAppPage(url, RENDERER_DIR)) return;
+    e.preventDefault();
+    if (/^https?:|^mailto:/.test(url)) shell.openExternal(url);
   });
 }
+
+const RENDERER_DIR = path.join(__dirname, 'renderer');
 
 const webPreferences = () => ({
   preload: path.join(__dirname, 'preload.js'),
@@ -450,6 +507,41 @@ const webPreferences = () => ({
   nodeIntegration: false,
   sandbox: true,
 });
+
+function setListeningStatus(status) {
+  const modes = ['off', 'starting', 'listening', 'hearing', 'paused', 'error'];
+  if (!status || !modes.includes(status.mode)) return;
+  listeningStatus = config.voice.wakeWord
+    ? { mode: status.mode, text: String(status.text || '').slice(0, 160) }
+    : { mode: 'off', text: 'Microfone desligado' };
+  for (const w of [win, listeningIndicator]) {
+    if (w && !w.isDestroyed()) w.webContents.send('voice:status', listeningStatus);
+  }
+  tray?.setToolTip(`Ohara · ${listeningStatus.text}`);
+}
+
+function syncListeningIndicator() {
+  if (!listeningIndicator || listeningIndicator.isDestroyed()) return;
+  if (config.voice.showListeningIndicator !== false) listeningIndicator.showInactive();
+  else listeningIndicator.hide();
+}
+
+function createListeningIndicator() {
+  if (config.voice.wakeWord) setListeningStatus({ mode: 'starting', text: 'Abrindo microfone…' });
+  const area = screen.getPrimaryDisplay().workArea;
+  listeningIndicator = new BrowserWindow({
+    width: 320, height: 76,
+    x: area.x + Math.max(0, area.width - 340), y: area.y + Math.max(0, area.height - 96),
+    frame: false, resizable: false, skipTaskbar: true, alwaysOnTop: true,
+    show: false, backgroundColor: '#171c28', webPreferences: webPreferences(),
+  });
+  listeningIndicator.loadFile(path.join(__dirname, 'renderer', 'listening.html'));
+  listeningIndicator.once('ready-to-show', syncListeningIndicator);
+  listeningIndicator.on('close', (e) => {
+    if (!quitting) { e.preventDefault(); updateConfig({ voice: { showListeningIndicator: false } }); }
+  });
+  secureWindow(listeningIndicator);
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -553,6 +645,47 @@ function showQuick(payload = { mode: 'ask' }) {
   quick.webContents.send('quick:open', payload);
 }
 
+// Modo entrevista: janela estreita no canto direito, por cima do Teams. Criada só quando usada.
+function toggleInterview() {
+  if (interviewWin && !interviewWin.isDestroyed()) {
+    if (interviewWin.isVisible()) interviewWin.hide();
+    else interviewWin.showInactive();
+    return;
+  }
+  const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  const width = 420;
+  const height = Math.min(720, area.height - 40);
+  interviewWin = new BrowserWindow({
+    width, height, minWidth: 320, minHeight: 360,
+    x: area.x + area.width - width - 16, y: area.y + 20,
+    frame: false, alwaysOnTop: true, skipTaskbar: false, show: false,
+    title: 'Ohara · Entrevista', icon: ICON, backgroundColor: '#121722',
+    // Continua ouvindo e processando com o foco no Teams.
+    webPreferences: { ...webPreferences(), backgroundThrottling: false },
+  });
+  interviewWin.setAlwaysOnTop(true, 'floating');
+  interviewWin.loadFile(path.join(__dirname, 'renderer', 'interview.html'));
+  interviewWin.once('ready-to-show', () => interviewWin.show());
+  interviewWin.on('closed', () => {
+    interview.stop();
+    interviewWin = null;
+  });
+  secureWindow(interviewWin);
+  if (process.argv.includes('--dev')) interviewWin.webContents.openDevTools({ mode: 'detach' });
+  // Desenvolvimento: CENTRAL_INTERVIEW_TEST=arquivo.png começa a ouvir, espera CENTRAL_WAIT ms, salva um print e fecha.
+  if (process.env.CENTRAL_INTERVIEW_TEST) {
+    interviewWin.webContents.once('did-finish-load', async () => {
+      await new Promise((r) => setTimeout(r, 800));
+      await interviewWin.webContents.executeJavaScript("document.getElementById('toggle').click()", true);
+      await new Promise((r) => setTimeout(r, Number(process.env.CENTRAL_WAIT || 30000)));
+      fs.writeFileSync(process.env.CENTRAL_INTERVIEW_TEST, (await interviewWin.webContents.capturePage()).toPNG());
+      fs.writeFileSync(`${process.env.CENTRAL_INTERVIEW_TEST}.json`, JSON.stringify(interview.snapshot(), null, 2));
+      quitting = true;
+      app.quit();
+    });
+  }
+}
+
 function toggleWindow() {
   if (!win) return;
   if (win.isVisible() && win.isFocused()) {
@@ -625,19 +758,10 @@ function createTray() {
         { label: 'Janela rápida', click: () => showQuick({ mode: 'ask' }) },
         { label: 'Hoje', click: () => showView('today') },
         { label: 'Painel de demandas', click: () => showView('meetings') },
+        { label: 'Modo entrevista', click: () => toggleInterview() },
         { type: 'separator' },
         ...automations.snapshot().routines.slice(0, 6).map((r) => ({ label: `${r.icon} ${r.name}`, click: () => { showView('chat'); automations.runRoutine(r.id); } })),
         { type: 'separator' },
-        {
-          // Liga/desliga a escuta contínua (microfone) sem abrir a janela.
-          label: 'Ouvir "Ohara" (microfone)',
-          type: 'checkbox',
-          checked: !!config.voice.wakeWord,
-          click: (item) => {
-            if (!item.checked) endVoiceSession(false);
-            updateConfig({ voice: { wakeWord: item.checked } });
-          },
-        },
         {
           label: 'Iniciar com o Windows',
           type: 'checkbox',
@@ -670,10 +794,46 @@ function registerHotkeys() {
   bind('toggle', h.toggle, toggleWindow);
   bind('quick', h.quick, () => (quick?.isVisible() ? quick.hide() : showQuick({ mode: 'ask' })));
   bind('clipboard', h.clipboard, () => showQuick({ mode: 'clipboard', text: clipboard.readText() }));
-  bind('voice', h.voice, () => {
-    if (quick?.isVisible()) quick.webContents.send('quick:voice-toggle');
-    else showQuick({ mode: 'voice' });
-  });
+  bind('fixText', h.fixText, guarded('correção de texto', fixSelectedText));
+  bind('interview', h.interview, toggleInterview);
+}
+
+// ---------- Correção do texto selecionado (qualquer app) ----------
+// Guarda tudo o que estava copiado (texto, HTML, RTF, imagem) para devolver depois.
+const clipboardAccess = {
+  snapshot: () => ({ text: clipboard.readText(), html: clipboard.readHTML(), rtf: clipboard.readRTF(), image: clipboard.readImage() }),
+  restore: (s) => {
+    const data = {};
+    if (s.text) data.text = s.text;
+    if (s.html) data.html = s.html;
+    if (s.rtf) data.rtf = s.rtf;
+    if (s.image && !s.image.isEmpty()) data.image = s.image;
+    if (Object.keys(data).length) clipboard.write(data);
+    else clipboard.clear();
+  },
+  readText: () => clipboard.readText(),
+  writeText: (t) => clipboard.writeText(t),
+  clear: () => clipboard.clear(),
+};
+let fixingText = false;
+
+async function fixSelectedText() {
+  if (fixingText) return; // atalho apertado de novo enquanto corrige
+  fixingText = true;
+  tray?.setToolTip('Ohara · corrigindo texto…');
+  try {
+    const r = await textFix.fixSelection({
+      clipboard: clipboardAccess,
+      keys: { copy: system.copySelection, paste: system.pasteInto },
+      correct: async (text) => (await askOnce({ feature: 'correcao', prompt: textFix.buildFixPrompt(text), schema: textFix.FIX_SCHEMA, config, usage })).data,
+    });
+    const msg = textFix.fixMessage(r);
+    if (msg && Notification.isSupported()) new Notification({ title: 'Correção de texto', body: msg, icon: ICON, silent: r.status === 'unchanged' }).show();
+    if (r.status === 'error') errorLog('correção de texto', r.error);
+  } finally {
+    fixingText = false;
+    tray?.setToolTip('Ohara');
+  }
 }
 
 async function captureScreen() {
@@ -718,7 +878,14 @@ function registerIpc() {
   // Configuração
   handle('config:get', () => publicConfig());
   handle('app:version', () => app.getVersion());
-  handle('config:set', (partial) => updateConfig(partial));
+  handle('update:state', () => updater.state());
+  handle('update:check', () => updater.check());
+  handle('update:install', () => updater.install());
+  handle('config:set', (partial) => updateConfig(sanitizeConfigPatch(partial)));
+  handle('development:check', () => require('./core/development').checkDevelopment({
+    repo: config.selfRepo,
+    desktopProbe: () => require('./core/desktop-probe').probeDesktop({ executable: process.execPath, appPath: app.getAppPath(), packaged: app.isPackaged }),
+  }));
   handle('hotkeys:status', () => hotkeyStatus);
 
   // Conversas
@@ -769,11 +936,11 @@ function registerIpc() {
     return r.canceled ? [] : r.filePaths;
   });
   handle('screen:capture', () => captureScreen());
-  handle('voice:dictate', () => system.startVoiceTyping());
+  handle('voice:dictate', () => system.startVoiceTyping()); // sem Whisper: ditado do Windows (Win+H)
   handle('tts:speak', (text, voice) => speak(text, voice));
   handle('tts:stop', () => stopSpeaking());
   handle('tts:voices', () => NEURAL_VOICES);
-  handle('shell:openPath', (p) => shell.openPath(p));
+  handle('shell:openPath', (p) => shell.openPath(assertSafeToOpen(p)));
   handle('shell:openExternal', (url) => (/^(https?|mailto):/.test(url) ? shell.openExternal(url) : null));
   handle('clipboard:write', (text) => clipboard.writeText(String(text || '')));
   handle('clipboard:read', () => clipboard.readText());
@@ -801,6 +968,38 @@ function registerIpc() {
   handleSafe('insights:saveMarkdown', (key) => insights.saveMarkdown(key));
   handle('insights:mailto', (key) => shell.openExternal(insights.mailto(key)));
 
+  // Ferramentas locais: tudo no modelo local (Ollama), sem cota e sem o dado sair do PC.
+  handle('tools:status', async () => {
+    const models = await localLlm.installedModels(config);
+    const o = config.ollama || {};
+    const need = { texto: o.model, embeddings: o.embedModel || 'bge-m3', visao: o.visionModel || 'qwen2.5vl:7b' };
+    return {
+      ollama: models !== null,
+      missing: models ? Object.values(need).filter((m) => m && !localLlm.hasModel(models, m)) : [],
+      models: need,
+      docs: docIndex.status(),
+      privacy: config.privacy,
+      preSummary: config.meetings?.localPreSummary !== false,
+    };
+  });
+  handle('dialog:file', async (kind) => {
+    const filters = kind === 'image'
+      ? [{ name: 'Imagens', extensions: ['png', 'jpg', 'jpeg', 'webp'] }]
+      : [{ name: 'Documentos', extensions: ['pdf', 'docx', 'txt', 'md', 'html', 'htm', 'rtf', 'csv', 'json', 'log'] }];
+    const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  handleSafe('docs:index', () => docIndex.rebuild());
+  handleSafe('docs:ask', (q) => docIndex.ask(q));
+  handleSafe('tools:extract', async ({ file, text } = {}) => localTools.extractFields({ config, text: file ? await extractText(file) : text }));
+  handleSafe('tools:triage', (text) => localTools.triage({ config, text }));
+  handleSafe('tools:photo', (file) => localTools.readPhoto({ config, image: file }));
+  handleSafe('tools:anonymize', (text) => localTools.anonymize({
+    config, text, names: config.privacy?.names !== false, keep: [...(config.privacy?.keep || []), config.meetings?.selfName],
+  }));
+  handleSafe('tools:commit', (repo) => localTools.commitMessage({ config, repo }));
+  handleSafe('tools:log', (text) => localTools.diagnoseLog({ config, text }));
+
   // Automações
   handle('auto:get', () => automations.snapshot());
   handle('auto:saveRoutine', (r) => automations.saveRoutine(r));
@@ -819,19 +1018,30 @@ function registerIpc() {
   handle('slack:status', () => slack.status());
   handleSafe('slack:send', (person, text) => slack.sendDM(person, text));
   handleSafe('slack:import', () => automations.importSlack());
-  handle('whatsapp:status', () => whatsapp.status());
-  handleSafe('whatsapp:send', (text) => whatsapp.send(text));
-  handle('whatsapp:webStatus', () => whatsappWeb.status());
-  handle('whatsapp:webConnect', () => whatsappWeb.connect());
-  handleSafe('whatsapp:confirm', (chatId, messageId, index) => orchestrator.confirmWhatsApp(chatId, messageId, index));
-  handleSafe('whatsapp:cancel', (chatId, messageId, index) => orchestrator.cancelWhatsApp(chatId, messageId, index));
+  handle('whatsapp:status', () => ({ configured: false, disabled: true }));
+  handle('whatsapp:webStatus', () => ({ connected: false, disabled: true }));
+  handleSafe('whatsapp:send', disabledFeature);
+  handleSafe('whatsapp:webConnect', disabledFeature);
+  handleSafe('whatsapp:confirm', disabledFeature);
+  handleSafe('whatsapp:cancel', disabledFeature);
+  // Ações da Ohara-AI no PC que esperam confirmação: a tela só diz QUAL item confirmar; o que roda é o que
+  // ficou guardado na mensagem (a interface não consegue mandar uma ação nova).
+  const actionRef = (chatId, messageId, index) => {
+    if (typeof chatId !== 'string' || typeof messageId !== 'string') throw new Error('Pedido inválido.');
+    const i = Number(index ?? 0);
+    if (!Number.isInteger(i) || i < 0 || i > 50) throw new Error('Pedido inválido.');
+    return [chatId, messageId, i];
+  };
+  handleSafe('pcaction:confirm', (chatId, messageId, index) => orchestrator.confirmPcAction(...actionRef(chatId, messageId, index)));
+  handleSafe('pcaction:cancel', (chatId, messageId, index) => orchestrator.cancelPcAction(...actionRef(chatId, messageId, index)));
   handle('whisper:status', () => whisper.status());
   handleSafe('whisper:install', () => whisper.install((p) => send('whisper:progress', p)));
+  // Ditado: só transcreve o áudio e devolve o texto para o campo do chat. Nada é enviado nem executado.
   handleSafe('whisper:transcribe', async (wavBytes) => {
     const file = path.join(os.tmpdir(), `ohara-voz-${Date.now()}.wav`);
     fs.writeFileSync(file, Buffer.from(wavBytes));
     try {
-      return await whisper.transcribe(file);
+      return await whisper.transcribe(file, { prompt: 'Ohara' });
     } finally {
       fs.rmSync(file, { force: true });
     }
@@ -840,9 +1050,14 @@ function registerIpc() {
   // Janela rápida
   handle('quick:hide', () => quick?.hide());
   handle('quick:ask', (text) => showQuick({ mode: 'ask', text, autoSend: true }));
-  handleSafe('voice:heard', (wavBytes) => onVoiceHeard(wavBytes));
+  handleSafe('voice:heard', disabledFeature);
   handle('voice:end', () => endVoiceSession(false));
   handle('voice:log', (msg) => voiceLog(String(msg).slice(0, 500)));
+  handle('voice:status', () => listeningStatus);
+  ipcMain.handle('voice:status-report', (event, status) => {
+    if (event.sender !== win?.webContents) return;
+    setListeningStatus(status);
+  });
   handle('app:loginItem', (on) => {
     if (on !== undefined && app.isPackaged) app.setLoginItemSettings({ openAtLogin: !!on, args: ['--hidden'] });
     return { enabled: app.getLoginItemSettings().openAtLogin, available: app.isPackaged };
@@ -853,6 +1068,26 @@ function registerIpc() {
     quick.setSize(w, Math.max(120, Math.min(640, Math.round(height))));
   });
   handle('quick:pin', (on) => { if (quick) quick.__pinned = !!on; });
+
+  // Modo entrevista (só a própria janela da entrevista manda áudio)
+  const fromInterview = (event) => interviewWin && event.sender === interviewWin.webContents;
+  handle('interview:snapshot', () => interview.snapshot());
+  handleSafe('interview:start', () => interview.start());
+  handle('interview:stop', () => interview.stop());
+  ipcMain.handle('interview:audio', (event, bytes, opts) => {
+    if (fromInterview(event) && bytes?.byteLength) interview.addAudio(bytes, opts || {});
+  });
+  ipcMain.handle('interview:turnEnd', (event) => { if (fromInterview(event)) interview.turnEnd(); });
+  handle('interview:answerNow', () => interview.answerNow());
+  handle('interview:ask', (text) => interview.ask(String(text || '').slice(0, 2000)));
+  handle('interview:openContext', () => shell.openPath(interview.ensureContext()));
+  handle('interview:openLog', () => {
+    if (interview.logFile && fs.existsSync(interview.logFile)) return shell.openPath(interview.logFile);
+    fs.mkdirSync(interview.transcriptsDir(), { recursive: true });
+    return shell.openPath(interview.transcriptsDir());
+  });
+  handle('interview:hide', () => interviewWin?.hide());
+  handle('interview:new', () => interview.newInterview());
   handle('quick:openInMain', (chatId) => {
     quick?.hide();
     showView('chat');
@@ -865,38 +1100,60 @@ app.on('second-instance', () => toggleWindow());
 
 app.whenReady().then(() => {
   app.setAppUserModelId('com.gabsx.central-ia');
-  // Microfone só para as janelas do próprio app (gravação de voz para o Whisper).
-  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(permission === 'media' && wc.getURL().startsWith('file:')));
-  session.defaultSession.setPermissionCheckHandler((wc, permission) => permission === 'media' && !!wc?.getURL().startsWith('file:'));
+  // Sem captura de microfone nesta edição. A única exceção é a janela do modo entrevista,
+  // que capta o áudio do PC (loopback: a voz de quem está na call) e o microfone (só para a transcrição salva).
+  const isInterview = (wc) => !!interviewWin && !interviewWin.isDestroyed() && wc === interviewWin.webContents;
+  session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(isInterview(wc) && ['media', 'display-capture'].includes(permission)));
+  session.defaultSession.setPermissionCheckHandler((wc, permission) => isInterview(wc) && ['media', 'display-capture'].includes(permission));
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    const main = interviewWin && !interviewWin.isDestroyed() ? interviewWin.webContents.mainFrame : null;
+    const f = request.frame;
+    if (!main || !f || f.processId !== main.processId || f.routingId !== main.routingId) return callback({});
+    try {
+      const [source] = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } });
+      callback(source ? { video: source, audio: 'loopback' } : {});
+    } catch {
+      callback({});
+    }
+  });
 
   enableAutoStartOnce();
   setTimeout(() => cleanupOldVersionsOnce().catch(() => {}), 5000);
   registerIpc();
+  updater = startUpdater({ send, notify });
   createWindow();
   createQuick();
+  if (process.env.CENTRAL_INTERVIEW_TEST) toggleInterview();
+
   trayRebuild = createTray();
   registerHotkeys();
 
-  meetings.start();
-  automations.start();
+  // Deixa o modelo local carregado: a primeira pergunta não espera ~20 s de carregamento.
+  setTimeout(() => require('./core/local-chat').warmLocal(config).catch(() => {}), 3000);
+  // Quadro do Orca em dia: Em andamento → Em revisão → Concluído pelo estado do Git (orca.autoStatus: false desliga).
+  const syncOrca = () => { if (config.orca?.autoStatus !== false) require('./integrations/orca').syncOrcaStatus(config).catch(() => {}); };
+  setTimeout(syncOrca, 60_000);
+  setInterval(syncOrca, 10 * 60_000);
+  guarded('reuniões', () => meetings.start())();
+  guarded('automações', () => automations.start())();
   // Classifica "aguardando outros" antigos (uma chamada rápida, só quando houver itens sem marca).
   setTimeout(() => insights.classifyWaiting().catch(() => {}), 20_000);
   calendar.refresh().catch(() => {});
   // Pauta antes das calls e amostras de cota para o gráfico.
   setInterval(() => {
     calendar.refresh().catch(() => {});
-    insights.checkPrep();
+    guarded('pauta', () => insights.checkPrep())();
   }, 60_000);
-  setInterval(() => usage.sampleLimits(), 5 * 60_000);
-  usage.sampleLimits();
+  setInterval(guarded('cota', () => usage.sampleLimits()), 5 * 60_000);
+  guarded('cota', () => usage.sampleLimits())();
 });
 
 app.on('before-quit', () => {
   quitting = true;
-  whatsappWeb.destroy();
   meetings.stop();
   automations.stop();
-  for (const s of stores) s.flush();
+  interview.stop();
+  for (const s of stores) s.flush(); // flush não lança: um arquivo preso não impede salvar os outros
 });
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', (e) => e.preventDefault());

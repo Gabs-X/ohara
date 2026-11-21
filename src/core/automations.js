@@ -114,18 +114,19 @@ class Automations {
 
   deleteRoutine(id) {
     this.store.data.routines = this.store.data.routines.filter((r) => r.id !== id);
-    this.store.data.schedules = this.store.data.schedules.filter((s) => !(s.action.type === 'routine' && s.action.routineId === id));
+    this.store.data.schedules = this.store.data.schedules.filter((s) => !(s.action?.type === 'routine' && s.action.routineId === id));
     this.#changed();
   }
 
   saveSchedule(s) {
+    if (!s?.action || typeof s.action.type !== 'string') throw new Error('Escolha o que o agendamento deve fazer.');
     const list = this.store.data.schedules;
     const i = list.findIndex((x) => x.id === s.id);
     const clean = {
       id: s.id || crypto.randomUUID(),
       name: s.name || 'Agendamento',
       days: (s.days || []).map(Number).filter((n) => n >= 0 && n <= 6),
-      times: (s.times || []).filter((t) => /^\d{2}:\d{2}$/.test(t)),
+      times: (s.times || []).filter((t) => /^([01]\d|2[0-3]):[0-5]\d$/.test(t)),
       action: s.action,
       enabled: s.enabled !== false,
       catchUp: !!s.catchUp,
@@ -185,7 +186,7 @@ class Automations {
     if (!s) throw new Error('Agendamento não encontrado');
     try {
       const r = await this.runAction(s.action, s.name);
-      if (s.action.type !== 'routine') this.#log(s.name, 'concluída', typeof r === 'number' ? `${r} item(ns)` : '');
+      if (s.action?.type !== 'routine') this.#log(s.name, 'concluída', typeof r === 'number' ? `${r} item(ns)` : '');
       return r;
     } catch (err) {
       if (err instanceof DeferError || err.deferred) {
@@ -203,6 +204,7 @@ class Automations {
   start() {
     this.stop();
     const startedAt = new Date();
+    let last = null; // último tick: depois de suspender o PC, roda o que venceu no intervalo
     const tick = (first = false) => {
       const now = new Date();
       const today = ymd(now);
@@ -212,7 +214,7 @@ class Automations {
         for (const t of s.times) {
           const key = `${s.id}@${today}@${t}`;
           if (this.store.data.lastRun[key]) continue;
-          const due = t === hm;
+          const due = t === hm || (last && last.day === today && t > last.hm && t <= hm);
           // Ao abrir o app depois do horário (PC ligado mais tarde), roda o que perdeu nas últimas 4 h.
           const missed = first && s.catchUp && t < hm && minutesBetween(t, hm) <= 240 && startedAt.getHours() * 60 + startedAt.getMinutes() > toMin(t);
           if (!due && !missed) continue;
@@ -220,6 +222,7 @@ class Automations {
           this.runSchedule(s.id).catch(() => {});
         }
       }
+      last = { day: today, hm };
       // Limpa marcas com mais de 7 dias.
       for (const k of Object.keys(this.store.data.lastRun)) if (Date.now() - this.store.data.lastRun[k] > 7 * 864e5) delete this.store.data.lastRun[k];
       this.store.save();
@@ -250,7 +253,8 @@ class Automations {
     const byTs = new Map(msgs.map((m) => [m.ts, m]));
     let added = 0;
     for (const d of r.data.demandas || []) {
-      const src = byTs.get(d.ts);
+      // Modelo local às vezes devolve "[ts=123]" em vez de "123".
+      const src = byTs.get(String(d.ts || '').replace(/^\[?ts=/, '').replace(/\]$/, ''));
       this.meetings.addTask({
         text: d.descricao,
         deadline: /^\d{4}-\d{2}-\d{2}$/.test(d.prazo || '') ? d.prazo : null,
