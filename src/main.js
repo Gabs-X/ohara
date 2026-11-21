@@ -1118,6 +1118,8 @@ app.whenReady().then(() => {
   trayRebuild = createTray();
   registerHotkeys();
 
+  // Deixa o modelo local carregado: a primeira pergunta não espera ~20 s de carregamento.
+  setTimeout(() => require('./core/local-chat').warmLocal(config).catch(() => {}), 3000);
   guarded('reuniões', () => meetings.start())();
   guarded('automações', () => automations.start())();
   // Classifica "aguardando outros" antigos (uma chamada rápida, só quando houver itens sem marca).

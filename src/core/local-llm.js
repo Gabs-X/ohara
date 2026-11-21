@@ -3,6 +3,7 @@
 // e de clientes, então se o Ollama estiver fora do ar a função para com um erro claro.
 const fs = require('fs');
 const path = require('path');
+const { keepAlive } = require('./providers/ollama');
 
 const baseUrl = (config) => (config.ollama?.url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 
@@ -59,6 +60,7 @@ async function generate({ config, system, prompt, schema, images, model, tempera
     stream: false,
     messages: [...(system ? [{ role: 'system', content: system }] : []), user],
     options: { num_ctx: o.contextTokens || 16384, temperature },
+    keep_alive: keepAlive(config),
   };
   if (schema) body.format = schema;
   const j = await post(config, '/api/chat', body, { signal, timeoutSec });

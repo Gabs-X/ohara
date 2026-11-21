@@ -557,3 +557,19 @@ test('a conta escolhida fica lembrada: o próximo console no mesmo projeto não 
   assert.equal(orcaCalls.length, 2);
   assert.equal(orcaCalls[1].account, 'imlaw');
 });
+
+test('cumprimento ("oi ohara, tudo bem?") vai direto para a Ohara-AI, sem gastar a chamada de decisão', async () => {
+  const { o } = setup();
+  const chat = o.create(WORK);
+  const p = o.send(chat.id, { text: 'oi ohara, tudo bem?', runId: 's1' });
+  await tick();
+  assert.equal(decideCalls.length, 0);
+  localCalls[0].finish();
+  assert.equal((await p).provider, 'ollama');
+  // Com pedido junto não é só cumprimento: segue o fluxo normal.
+  const p2 = o.send(chat.id, { text: 'bom dia, me explica como funciona o roteamento', runId: 's2' });
+  await tick();
+  assert.equal(decideCalls.length, 1);
+  localCalls[1].finish();
+  await p2;
+});

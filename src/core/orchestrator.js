@@ -69,6 +69,9 @@ const PARALLEL_NOTE =
 // Categorias que exigem ferramentas: só vão para o Claude (no Orca) quando o pedido é uma ação.
 const AGENT_CATEGORIES = new Set(['codigo', 'codigo_complexo', 'sistema', 'pesquisa']);
 const ACTION_RE = /\b(corrig\w*|conserta\w*|implement\w*|cri[ae]\w*|alter\w*|mud[ae]\w*|adicion\w*|remov\w*|apag\w*|refator\w*|ajust\w*|atualiz\w*|instal\w*|rod[ae]\w*|execut\w*|faz\w*|faca\w*|resolv\w*|publi\w*|deploy\w*|commit\w*|push\w*|merge\w*|migr\w*|otimiz\w*|escrev\w*|gera\w*|gere\w*|abr[aei]\w*|abert\w*|encaminh\w*|feche\w*|mov[ae]\w*|copi[ae]\w*|renome\w*|pesquis\w*|procur\w*|busca\w*|investig\w*|analis\w*|audit\w*|revis\w*|teste\w*|testar|debug\w*|desenvolv\w*|constru\w*|monte|montar)\b/;
+// Cumprimento ou agradecimento curto: não precisa da Ohara-AI decidir quem atende (economiza uma chamada ao modelo).
+const SMALL_TALK_RE = /^ (oi|ola|opa|e ai|eai|bom dia|boa tarde|boa noite|obrigad[oa]|valeu|vlw|tchau|ate mais|tudo bem|tudo bom|como vai|kk+|ha(ha)+|rs+)\b[^]{0,25}$/;
+const isSmallTalk = (plain) => SMALL_TALK_RE.test(plain) && !ACTION_RE.test(plain) && !isHandoff(plain);
 const QUESTION_RE = /\b(tem como|da pra|da para|consegue|conseguiria|voce sabe|vc sabe|sabe fazer|sabe como|e possivel|seria possivel|como (eu )?(faco|posso)|como funciona)\b/;
 // Pedido explícito para o Claude/Orca ("encaminhe ao Claude", "abre o Orca", "era pra ter aberto o Orca"):
 // vai sem depender do modelo local acertar.
@@ -369,7 +372,7 @@ class Orchestrator {
     if (decision.provider === 'ollama' && !improvement && !answered && !images.length && (!override || override === 'auto')) {
       const explicit = isHandoff(normalize(text));
       // Mensagem de WhatsApp tem fluxo próprio (rascunho + confirmação) no chat local.
-      const skip = config.ollama?.decide === false || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && asksPcInfo(text));
+      const skip = config.ollama?.decide === false || isSmallTalk(normalize(text)) || (!!this.whatsappWeb && wantsWhatsApp(text)) || (config.ollama?.tools !== false && asksPcInfo(text));
       // Limite curto: com o Ollama lento ou travado, o pedido ficava até 3 min invisível e sem como cancelar.
       const verdict = skip ? null : await decideLocal({ config, history: chat.messages, text, signal: AbortSignal.timeout(15_000) }).catch(() => null);
       if (explicit || verdict?.acao === 'claude') {

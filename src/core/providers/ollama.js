@@ -3,6 +3,12 @@
 
 const DEFAULT_URL = 'http://127.0.0.1:11434';
 
+// Quanto tempo o Ollama mantém o modelo carregado depois do último uso. O padrão dele (5 min) fazia
+// a primeira pergunta depois de uma pausa esperar ~20 s só para carregar o modelo de novo.
+function keepAlive(config) {
+  return config.ollama?.keepAlive ?? '30m';
+}
+
 function ollamaUrl(config) {
   return (config.ollama?.url || DEFAULT_URL).replace(/\/+$/, '');
 }
@@ -33,7 +39,7 @@ async function runOllama(o) {
   }
   messages.push({ role: 'user', content: o.prompt });
   const timeout = AbortSignal.timeout((config.ollama?.timeoutSec || 180) * 1000);
-  const body = { model, stream: true, messages };
+  const body = { model, stream: true, messages, keep_alive: keepAlive(config) };
   if (config.ollama?.contextTokens) body.options = { num_ctx: config.ollama.contextTokens };
 
   let res;
@@ -79,4 +85,4 @@ async function runOllama(o) {
   return { provider: 'ollama', model, text: text.trim(), error: text.trim() ? null : 'A IA local devolveu resposta vazia.', tokens };
 }
 
-module.exports = { runOllama, ollamaModels, ollamaUrl };
+module.exports = { runOllama, ollamaModels, ollamaUrl, keepAlive };

@@ -51,6 +51,7 @@ const DEFAULT_CONFIG = {
     url: 'http://127.0.0.1:11434',
     model: 'qwen2.5:14b',
     timeoutSec: 180,
+    keepAlive: '30m', // tempo que o Ollama mantém o modelo carregado depois do último uso (o padrão dele é 5 min)
     contextTokens: 16384, // janela de contexto (o padrão do Ollama é pequeno para buscas em reuniões)
     embedModel: 'bge-m3', // busca por significado nos documentos (ollama pull bge-m3)
     visionModel: 'qwen2.5vl:7b', // leitura de documento por foto (ollama pull qwen2.5vl:7b)

@@ -4,8 +4,8 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { TOOL_DEFS, runPcTool, guessTools } = require('./pc-tools');
-const { ollamaUrl } = require('./providers/ollama');
+const { TOOL_DEFS, runPcTool, guessTools, asksPcInfo } = require('./pc-tools');
+const { ollamaUrl, keepAlive } = require('./providers/ollama');
 const { BRIEF_PROMPT, parseBrief, briefInput } = require('./brief');
 
 const MAX_HISTORY_CHARS = 14_000; // ~4 mil tokens de histórico; cabe folgado nos 16 mil do contexto
@@ -81,7 +81,7 @@ async function ollamaChat({ config, messages, signal, onDelta, format, temperatu
     res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: o.model, messages, stream: true, options, ...(format ? { format } : {}) }),
+      body: JSON.stringify({ model: o.model, messages, stream: true, options, keep_alive: keepAlive(config), ...(format ? { format } : {}) }),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
   } catch (e) {
@@ -132,7 +132,7 @@ async function ollamaToolCall({ config, messages, signal, tools }) {
     res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: o.model, messages, stream: false, ...(tools ? { tools } : {}), options: { num_ctx: o.contextTokens || 16384 } }),
+      body: JSON.stringify({ model: o.model, messages, stream: false, ...(tools ? { tools } : {}), options: { num_ctx: o.contextTokens || 16384 }, keep_alive: keepAlive(config) }),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
   } catch (e) {
@@ -211,9 +211,10 @@ const DECIDE_PROMPT = [
   'Na dúvida se é para abrir o Orca, NÃO escolha "claude": abrir um projeto sem ele pedir atrapalha mais do que ajuda.',
   '"claude_chat": o Claude responde aqui mesmo no chat, sem abrir projeto. Gasta cota, então só use quando for NECESSÁRIO e o assunto NÃO for projeto, código ou arquivos (isso é sempre "claude"). Casos:',
   '- precisa de informação atual ou da internet que o modelo local não tem (notícia, cotação, preço, lei ou versão recente, resultado de jogo, previsão do tempo);',
-  '- raciocínio difícil em que errar custa caro: análise jurídica, contas e finanças com vários passos, comparação técnica detalhada, texto longo e formal (contrato, petição, e-mail delicado);',
+  '- raciocínio difícil em que errar custa caro: análise jurídica, contas e finanças com vários passos, texto longo e formal (contrato, petição, e-mail delicado);',
+  'Comparar coisas do dia a dia ou explicar diferenças conhecidas ("café arábica ou robusta", "qual navegador para programar", "diferença entre X e Y") é "conversar": o Claude demora bem mais para responder.',
   '- a Ohara-AI já errou ou não soube responder nesta conversa e ele reclamou, ou ele pediu uma resposta mais caprichada ou a opinião do Claude sem ser sobre projeto.',
-  'Conversa comum, dúvidas simples, explicações gerais, textos curtos, resumos e consultas do PC são "conversar", mesmo que o Claude fosse fazer melhor. Se você não tiver certeza de que a Ohara-AI sabe responder bem (fato que ela pode não saber, assunto técnico ou específico), escolha "claude_chat": é melhor consultar o Claude do que inventar.',
+  'Conversa comum, dúvidas simples, explicações gerais, textos curtos, resumos e consultas do PC são "conversar", mesmo que o Claude fosse fazer melhor. Na dúvida entre "conversar" e "claude_chat", escolha "conversar": a Ohara-AI responde na hora e, se perceber que não sabe, ela mesma consulta o Claude. "claude_chat" é para quando já está claro que precisa dele (informação atual da internet, raciocínio difícil, texto formal longo).',
   'Responda só com JSON: {"acao":"conversar", "claude" ou "claude_chat","tarefa":"se for claude: a tarefa completa e autossuficiente em 1 a 3 frases, com projeto, arquivos citados e o resultado que ele quer; senão vazio","motivo":"se for claude_chat: em poucas palavras, por que o modelo local não basta; senão vazio"}',
 ].join('\n');
 
@@ -281,6 +282,72 @@ const MARK_RE = /\n?\[\[[^\]]+\]\]\s*/g;
 const CONSULT_RE = /\[\[consultar_claude:?\s*([^\]]*)\]\]/i;
 const IMPROVE_MARK_RE = /\[\[melhoria:[^\]]+\]\]/i;
 
+// A revisão custa uma chamada inteira ao modelo (~8 s). Vale quando há risco do que ela pega:
+// dados lidos do PC (números), promessa de ação, pedido de opinião, fato pessoal dele, oferta de melhoria,
+// "não sei" (pode virar consulta ao Claude) ou resposta longa. Conversa simples vai direto.
+const plainText = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const PROMISE_RE = /\b(vou|vamos|irei|encaminh\w*|enviei|mandei|fiz|alterei|mudei|apaguei|removi|instalei|executei|rodei|configurei|abri|fechei|corrigi|ajustei|estou (fazendo|alterando|abrindo|corrigindo))\b/;
+const OPINION_RE = /\b(melhor|pior|o que (voce|vc) acha|vale a pena|compensa|devo|deveria|recomend\w*|prefer\w*|escolh\w*|opiniao|indica)\b/;
+const PERSONAL_RE = /\b(meu|minha|meus|minhas|lembra|lembrar|sabe sobre mim|quem sou)\b/;
+const UNSURE_RE = /\b(nao sei|nao tenho (certeza|informac\w*|acesso)|nao consigo (saber|responder)|talvez|provavelmente)\b/;
+
+// Ferramentas do PC para esta pergunta (null = conversa comum, sem ferramentas). "Navegador" e "programa"
+// sozinhos não bastam ("qual o melhor navegador para programar?" é conversa): precisa falar do PC dele.
+const GENERIC_TOOLS = new Set(['navegadores', 'programas']);
+const MINE_RE = /\b(eu tenho|tenho|tem instalad\w*|meu|minha|meus|minhas|instalad\w*|abert[oa]s?|no pc|do pc|neste pc|nesse pc|aqui|estou usando|uso)\b/;
+function pcToolsFor(text) {
+  const prefetch = guessTools(text);
+  if (!prefetch.length && !asksPcInfo(text)) return null;
+  // Sem ferramenta óbvia, ou só navegadores/programas: só usa se a pergunta for sobre o PC dele.
+  const generic = !prefetch.length || prefetch.every((p) => GENERIC_TOOLS.has(p.name));
+  if (generic && !MINE_RE.test(plainText(text))) return null;
+  return prefetch;
+}
+
+function needsReview({ text, draft, used = [] }) {
+  if (used.length) return true;
+  const q = plainText(text);
+  const d = plainText(draft);
+  if (IMPROVE_MARK_RE.test(draft)) return true;
+  if (OPINION_RE.test(q) || PERSONAL_RE.test(q)) return true;
+  if (PROMISE_RE.test(d) || UNSURE_RE.test(d)) return true;
+  return draft.length > 1200;
+}
+
+// Repassa o texto ao vivo, mas para de mostrar quando aparece uma marcação "[[...]]" (consulta ao Claude,
+// melhoria, WhatsApp): a marcação nunca pisca na tela; o texto final chega no fim, já limpo.
+function liveGate(onDelta) {
+  let buf = '';
+  let open = true;
+  const gate = {
+    sent: false,
+    push(piece) {
+      if (!open) return;
+      buf += piece;
+      const i = buf.indexOf('[[');
+      if (i >= 0) {
+        open = false;
+        if (buf.slice(0, i).trim()) emit(buf.slice(0, i));
+        buf = '';
+        return;
+      }
+      const keep = buf.endsWith('[') ? 1 : 0; // pode ser o começo de "[["
+      const out = buf.slice(0, buf.length - keep);
+      buf = buf.slice(buf.length - keep);
+      if (out) emit(out);
+    },
+    flush() {
+      if (open && buf) emit(buf);
+      buf = '';
+    },
+  };
+  function emit(t) {
+    gate.sent = true;
+    onDelta(t);
+  }
+  return gate;
+}
+
 /**
  * Resposta da Ohara-AI: escreve um rascunho e revisa antes de mostrar (o modelo local não gasta cota,
  * então vale a passada extra para não prometer o que não fez nem inventar).
@@ -296,30 +363,43 @@ const IMPROVE_MARK_RE = /\[\[melhoria:[^\]]+\]\]/i;
 async function chatLocal({ config, history, text, project, signal, onDelta, onStep }) {
   const o = config.ollama || {};
   const messages = [{ role: 'system', content: systemPrompt(config, { project }) }, ...buildHistory(history), { role: 'user', content: text }];
-  // Blocos estruturados (WhatsApp, [[ignorar]]) não passam pela revisão: ela poderia estragar o formato.
-  const review = o.review !== false;
+  // Revisão: true = sempre, false = nunca, 'auto' (padrão) = só quando há risco (ver needsReview).
+  const reviewMode = o.review === true || o.review === false ? o.review : 'auto';
   let draft = null;
-  // Com ferramentas do PC (padrão): o modelo pode consultar o PC antes de escrever. Se a chamada com
-  // ferramentas falhar por outro motivo (modelo sem suporte, resposta estranha), segue no chat comum.
-  if (o.tools !== false) {
+  let streamed = false; // o rascunho já apareceu na tela enquanto era escrito
+  // Ferramentas do PC só quando a pergunta é sobre o PC: a chamada com ferramentas não tem streaming
+  // e leva as definições junto. Conversa comum vai direto, aparecendo na tela enquanto é escrita.
+  const prefetch = pcToolsFor(text);
+  if (o.tools !== false && prefetch) {
     try {
-      draft = await draftWithTools({ config, messages, signal, onStep, prefetch: guessTools(text) });
+      draft = await draftWithTools({ config, messages, signal, onStep, prefetch });
       if (!draft.text) draft = null;
-      else if (!review) onDelta?.(draft.text);
     } catch (e) {
       if (signal?.aborted || e.fatal) throw e;
       console.error('Ferramentas da Ohara-AI falharam:', e.message);
       draft = null;
     }
   }
-  if (!draft) draft = await ollamaChat({ config, messages, signal, onDelta: review ? null : onDelta });
+  if (!draft) {
+    const gate = o.stream !== false && onDelta ? liveGate(onDelta) : null;
+    draft = await ollamaChat({ config, messages, signal, onDelta: gate ? (t) => gate.push(t) : null });
+    gate?.flush();
+    streamed = !!gate?.sent;
+  }
+  // Mostra o texto só se ainda não apareceu ao vivo (no fim, a tela troca pelo texto final de qualquer jeito).
+  const show = (t) => {
+    if (!streamed) onDelta?.(t);
+  };
   // Ela mesma disse que não sabe: devolve sem mostrar nada, para a Ohara consultar o Claude.
   const tokensOf = (d) => ({ input: d.input || 0, cached: 0, output: d.output || 0, costUsd: 0 });
   const asked = String(draft.text || '').match(CONSULT_RE);
   if (asked) return { provider: 'ollama', model: o.model, text: draft.text.replace(MARK_RE, '\n').trim(), consult: asked[1].trim() || 'a Ohara-AI não sabia', tokens: tokensOf(draft) };
   const pcData = (draft.used || []).map((u) => `- ${u.name}(${JSON.stringify(u.args)}): ${clip(u.content, 2500)}`).join('\n');
   let final = draft;
-  if (review && draft.text && !/\[\[(whatsapp|ignorar)/i.test(draft.text)) {
+  // Blocos estruturados (WhatsApp, [[ignorar]]) não passam pela revisão: ela poderia estragar o formato.
+  const structured = /\[\[(whatsapp|ignorar)/i.test(draft.text || '');
+  const review = reviewMode !== false && !!draft.text && !structured && (reviewMode === true || needsReview({ text, draft: draft.text, used: draft.used || [] }));
+  if (review) {
     onStep?.('Ohara-AI: revisando a resposta');
     const offer = draft.text.match(IMPROVE_MARK_RE)?.[0] || null; // [[melhoria: ...]] só volta se a revisão confirmar
     const body = draft.text.replace(MARK_RE, '\n').trim();
@@ -351,13 +431,13 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
       }
       const fixed = String(j.resposta || '').replace(MARK_RE, '\n').trim();
       if (fixed) final = { text: [fixed, offer && j.melhoria === true ? offer : ''].filter(Boolean).join('\n'), input: draft.input + r.input, output: draft.output + r.output };
-      onDelta?.(fixed || draft.text);
+      show(fixed || draft.text);
     } catch (e) {
       if (signal?.aborted) throw e;
-      onDelta?.(draft.text); // revisão falhou: fica o rascunho
+      show(draft.text); // revisão falhou: fica o rascunho
     }
-  } else if (review) {
-    onDelta?.(draft.text);
+  } else {
+    show(draft.text);
   }
   return {
     provider: 'ollama',
@@ -367,4 +447,25 @@ async function chatLocal({ config, history, text, project, signal, onDelta, onSt
   };
 }
 
-module.exports = { chatLocal, decideLocal, briefLocal, buildHistory, systemPrompt, readMemory, draftWithTools };
+/**
+ * Carrega o modelo do chat no Ollama sem gerar nada (mensagens vazias), com a mesma janela de contexto
+ * das conversas: assim a primeira pergunta não espera o carregamento. Nunca lança.
+ */
+async function warmLocal(config) {
+  const o = config.ollama || {};
+  if (o.enabled === false || !o.model) return false;
+  try {
+    const res = await fetch(`${ollamaUrl(config)}/api/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: o.model, messages: [], keep_alive: keepAlive(config), options: { num_ctx: o.contextTokens || 16384 } }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    await res.text().catch(() => '');
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { warmLocal, needsReview, liveGate, pcToolsFor, chatLocal, decideLocal, briefLocal, buildHistory, systemPrompt, readMemory, draftWithTools };

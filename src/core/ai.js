@@ -7,7 +7,7 @@ const { runJsonl, shorten } = require('./providers/common');
 const { resolveCodex } = require('./providers/codex');
 const { claudeEnv, friendlyError } = require('./providers/claude');
 const { anonymize, deanonymize } = require('./local-tools');
-const { ollamaUrl } = require('./providers/ollama');
+const { ollamaUrl, keepAlive } = require('./providers/ollama');
 
 class DeferError extends Error {
   constructor(retryAt, reason) {
@@ -137,7 +137,7 @@ async function codexOnce({ prompt, schema, effort, config, usage, signal }) {
 async function ollamaOnce({ prompt, schema, config, signal }) {
   const o = config.ollama || {};
   const timeout = AbortSignal.timeout((o.timeoutSec || 120) * 1000);
-  const body = { model: o.model, stream: false, messages: [{ role: 'user', content: prompt }] };
+  const body = { model: o.model, stream: false, messages: [{ role: 'user', content: prompt }], keep_alive: keepAlive(config) };
   if (schema) body.format = schema;
   if (o.contextTokens) body.options = { num_ctx: o.contextTokens };
   let res;
